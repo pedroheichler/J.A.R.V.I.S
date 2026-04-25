@@ -1,0 +1,32 @@
+# Credenciais — NUNCA subir para o GitHub
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Arquivos temporários de áudio
+*.mp3
+*.wav
+*.tmp
+
+# Logs
+*.log

@@ -1,0 +1,4 @@
+anthropic
+SpeechRecognition
+pyttsx3
+pyaudio
