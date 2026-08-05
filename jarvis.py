@@ -45,7 +45,6 @@ import speech_recognition as sr
 import sounddevice as sd
 import numpy as np
 import scipy.io.wavfile as wav
-import tempfile
 import io
 
 # pyttsx3: fallback de voz offline
@@ -57,6 +56,11 @@ import fish_audio_sdk as fish
 # edge-tts: fallback gratuito
 import edge_tts
 import asyncio
+
+# miniaudio: decodifica o MP3 do Edge TTS para PCM, em Python puro.
+# Sem ele seria preciso um player externo (ffmpeg, mpg123, Windows Media
+# Player), que é o que amarrava o Jarvis ao Windows.
+import miniaudio
 
 # urllib.parse: codifica strings para URLs (ex: "inteligência artificial"
 # vira "intelig%C3%AAncia+artificial" para funcionar numa URL)
@@ -230,71 +234,129 @@ Responda sempre em português brasileiro.
 # FUNÇÕES AUXILIARES
 # =============================================================================
 
+# Ganho aplicado à voz. O PCM da Fish Audio vem baixo demais; o clip evita
+# que a amplificação estoure e distorça.
+GANHO_VOZ = 2.5
+
+FISH_SAMPLE_RATE = 44100   # taxa do PCM devolvido pela Fish Audio
+EDGE_SAMPLE_RATE = 24000   # taxa nativa do Edge TTS
+
+
+def _falar_fish(texto: str) -> None:
+    """
+    Fala usando a Fish Audio, tocando em STREAMING.
+
+    Antes o código fazia b"".join(...) e só começava a tocar depois que o
+    áudio inteiro chegava — a espera aparecia como atraso em toda resposta.
+    Agora cada pedaço vai pra placa de som assim que chega da rede.
+
+    latency="high" pede um buffer maior à placa. Custa alguns milissegundos
+    no começo e evita que uma variação da rede corte o áudio no meio.
+    """
+    sobra = b""
+
+    with sd.OutputStream(
+        samplerate=FISH_SAMPLE_RATE,
+        channels=1,
+        dtype="int16",
+        latency="high",
+    ) as saida:
+        for pedaco in fish_client.tts(
+            fish.TTSRequest(
+                reference_id=FISH_VOICE_ID,
+                text=texto,
+                format="pcm",
+            )
+        ):
+            dados = sobra + pedaco
+
+            # Cada amostra int16 ocupa 2 bytes. Se o pedaço terminar no meio
+            # de uma amostra, o byte solto espera o pedaço seguinte — senão
+            # np.frombuffer estoura.
+            corte = len(dados) - (len(dados) % 2)
+            sobra = dados[corte:]
+            if corte == 0:
+                continue
+
+            amostras = np.frombuffer(dados[:corte], dtype=np.int16)
+            amostras = np.clip(
+                amostras * GANHO_VOZ, -32768, 32767
+            ).astype(np.int16)
+            saida.write(amostras)
+
+
+def _falar_edge(texto: str) -> None:
+    """
+    Fala usando o Edge TTS (fallback gratuito).
+
+    O Edge TTS só entrega MP3, e o sounddevice só toca PCM. Antes isso era
+    resolvido salvando um arquivo temporário e mandando o Windows Media
+    Player tocar via PowerShell — o que prendia o Jarvis ao Windows.
+
+    Agora o miniaudio decodifica o MP3 em memória e o sounddevice toca, igual
+    ao caminho da Fish Audio. Sem arquivo temporário e sem programa externo.
+    """
+    async def baixar() -> bytes:
+        conversa = edge_tts.Communicate(texto, EDGE_VOICE)
+        partes = [
+            evento["data"]
+            async for evento in conversa.stream()
+            if evento["type"] == "audio"
+        ]
+        return b"".join(partes)
+
+    mp3 = asyncio.run(baixar())
+
+    decodificado = miniaudio.decode(
+        mp3,
+        output_format=miniaudio.SampleFormat.SIGNED16,
+        nchannels=1,
+        sample_rate=EDGE_SAMPLE_RATE,
+    )
+    amostras = np.array(decodificado.samples, dtype=np.int16)
+
+    sd.play(amostras, samplerate=EDGE_SAMPLE_RATE)
+    sd.wait()
+
+
 def falar(texto: str) -> None:
     """
     Faz o Jarvis falar o texto em voz alta E imprime no terminal.
 
     Prioridade:
-    1. Fish Audio — se FISH_AUDIO_API_KEY estiver configurada
+    1. Fish Audio — se FISH_AUDIO_API_KEY estiver configurada (em streaming)
     2. Edge TTS — fallback gratuito
     3. pyttsx3 — fallback offline
 
-    PCM = áudio cru sem compressão, toca direto pelo sounddevice sem precisar
-    de ffmpeg ou qualquer decodificador externo.
+    Todos os três tocam pelo sounddevice, sem depender de nenhum programa
+    externo — é o que permite rodar no Raspberry Pi sem alteração.
     """
     jarvis_falando.set()  # ativa — detecção de palma ignora enquanto True
     print(f"[Jarvis] {texto}")
 
-    if fish_client:
+    # O try/finally garante que a flag seja liberada mesmo se tudo falhar.
+    # Se ela ficasse presa em True, a detecção de palma morreria em silêncio.
+    try:
+        if fish_client:
+            try:
+                _falar_fish(texto)
+                return
+            except Exception as e:
+                print(f"[AVISO] Fish Audio falhou, usando voz local: {e}")
+
         try:
-            audio_bytes = b"".join(
-                fish_client.tts(
-                    fish.TTSRequest(
-                        reference_id=FISH_VOICE_ID,
-                        text=texto,
-                        format="pcm",
-                    )
-                )
-            )
-            audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-            # Amplifica o volume (2.0 = dobro) — clip evita distorção
-            audio_array = np.clip(audio_array * 2.5, -32768, 32767).astype(np.int16)
-            sd.play(audio_array, samplerate=44100)
-            sd.wait()
-            time.sleep(0.5)
-            jarvis_falando.clear()  # desativa
+            _falar_edge(texto)
             return
         except Exception as e:
-            print(f"[AVISO] Fish Audio falhou, usando voz local: {e}")
+            print(f"[AVISO] Edge TTS falhou, usando voz local: {e}")
 
-    # Fallback: Edge TTS
-    try:
-        async def _falar_edge():
-            communicate = edge_tts.Communicate(texto, EDGE_VOICE)
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-                tmp_path = f.name
-            await communicate.save(tmp_path)
-            subprocess.run(
-                ["powershell", "-c",
-                 f"$wmp = New-Object -ComObject WMPlayer.OCX; "
-                 f"$wmp.URL = '{tmp_path}'; "
-                 f"$wmp.controls.play(); "
-                 f"Start-Sleep -Seconds ($wmp.currentMedia.duration + 1); "
-                 f"$wmp.close()"],
-                capture_output=True
-            )
-            os.unlink(tmp_path)
-        asyncio.run(_falar_edge())
+        # Fallback final: voz offline do sistema
+        engine.say(texto)
+        engine.runAndWait()
+    finally:
+        # Pequena folga pro alto-falante silenciar antes de reabrir o microfone
         time.sleep(0.5)
-        jarvis_falando.clear()
-        return
-    except Exception as e:
-        print(f"[AVISO] Edge TTS falhou, usando voz local: {e}")
-
-    # Fallback final: pyttsx3
-    engine.say(texto)
-    engine.runAndWait()
-    time.sleep(0.5)
+        jarvis_falando.clear()  # desativa
     jarvis_falando.clear()
 
 

@@ -18,6 +18,11 @@ fish-audio-sdk
 edge-tts
 pyttsx3
 
+# Decodifica o MP3 do Edge TTS para PCM, em Python puro.
+# Sem ele seria preciso um player externo (ffmpeg, mpg123, Windows Media
+# Player) — era isso que prendia o Jarvis ao Windows.
+miniaudio
+
 # Integração com o Kronos
 supabase
 
