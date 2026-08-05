@@ -4,12 +4,16 @@ JARVIS - Assistente de Desktop Pessoal
 
 COMO FUNCIONA (arquitetura):
   1. Jarvis ouve você pelo microfone (ou lê do teclado)
-  2. Manda o comando pro Claude (claude-haiku-4-5)
-  3. Claude devolve um JSON dizendo qual "action" executar
-  4. Jarvis executa a action (abrir app, pesquisar, falar, etc.)
+  2. Manda o comando pro Claude (claude-haiku-4-5) junto com o histórico
+     da conversa e a lista de ferramentas disponíveis
+  3. Claude decide sozinho quais ferramentas chamar — e pode chamar mais
+     de uma no mesmo pedido
+  4. O tool_runner do SDK executa as funções e devolve os resultados
+  5. Claude compõe a resposta final, que o Jarvis fala em voz alta
 
-Por que JSON? Porque é estruturado. "Abrir chrome" pode virar
-{"action": "open_app", "app": "chrome"} — fácil de processar no código.
+Por que ferramentas (tool use)? Porque o schema de cada função é gerado
+e validado pelo SDK. Não existe "JSON inválido" pra tratar, e adicionar
+uma capacidade nova é só escrever mais uma função com @beta_tool.
 """
 
 # =============================================================================
@@ -27,6 +31,9 @@ import time         # controla intervalo entre palmas
 import queue        # fila thread-safe para comunicar palma → ação
 
 import anthropic    # SDK oficial da Anthropic — acessa o Claude
+# beta_tool: transforma uma função Python normal em ferramenta que o Claude
+# pode chamar. O schema é gerado sozinho a partir da assinatura e do docstring.
+from anthropic import beta_tool
 
 # SpeechRecognition: captura áudio do microfone e converte em texto
 # Internamente usa a Google Speech API (gratuita para uso básico)
@@ -94,6 +101,26 @@ supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY) if SUPABASE_
 # threading.Event é thread-safe, ao contrário de uma variável bool simples
 jarvis_falando = threading.Event()
 
+# -----------------------------------------------------------------------------
+# MEMÓRIA DE CONVERSA
+# -----------------------------------------------------------------------------
+# A API da Anthropic é SEM ESTADO: ela não guarda nada entre chamadas.
+# Quem lembra do passado é o nosso código — mandando o histórico junto
+# a cada requisição.
+#
+# Formato: [{"role": "user", ...}, {"role": "assistant", ...}, ...]
+# sempre alternando e SEMPRE começando com "user" (a API exige isso).
+#
+# É isso que faz funcionar:
+#   "Abre o Kronos no VSCode"  →  {"action": "open_folder", "folder": "kronos"}
+#   "Agora pesquisa no Google" →  Claude sabe que "agora" se refere ao Kronos
+historico: list[dict] = []
+
+# Quantas trocas (pergunta + resposta) manter na memória.
+# Cada troca são ~50 tokens, então 10 trocas ≈ 500 tokens por chamada —
+# irrelevante no custo, mas suficiente pra manter o contexto de uma conversa.
+MAX_TROCAS = 10
+
 # Inicializa o motor de voz pyttsx3 como fallback
 engine = pyttsx3.init()
 engine.setProperty("rate", 150)
@@ -151,10 +178,10 @@ PASTAS = {
 # Este texto instrui o Claude sobre como se comportar.
 # É enviado em cada chamada à API como "system message".
 #
-# A instrução mais importante: "retorne APENAS JSON válido"
-# Sem esse aviso, o Claude pode responder em linguagem natural
-# e o json.loads() vai falhar.
-SYSTEM_PROMPT = """
+# É uma f-string: as listas de apps e projetos são montadas a partir dos
+# dicionários APPS e PASTAS acima. Assim, quando você cadastrar um app novo,
+# o Claude fica sabendo automaticamente — sem precisar editar este texto.
+SYSTEM_PROMPT = f"""
 Você é J.A.R.V.I.S. (Just A Rather Very Intelligent System), o assistente de IA do Tony Stark.
 
 PERSONALIDADE:
@@ -168,46 +195,33 @@ PERSONALIDADE:
   "À sua disposição, senhor."
   "Feito. Posso sugerir também que o senhor descanse um pouco?"
 
-INSTRUÇÃO TÉCNICA:
-Analise o comando e retorne APENAS um JSON válido, sem texto adicional, markdown ou explicações.
+COMO AGIR:
+Você tem ferramentas para controlar o computador do senhor. Chame a ferramenta
+adequada quando o pedido exigir uma ação, e responda direto quando for apenas
+uma pergunta ou conversa — conversar não precisa de ferramenta.
 
-O JSON deve ter obrigatoriamente o campo "action" com um dos valores abaixo:
+Quando um pedido exigir mais de uma ação, chame várias ferramentas na mesma
+resposta. "Abre o Kronos e me diz minhas tarefas" são duas ferramentas.
 
-1. open_app — para abrir um aplicativo
-   Exemplo: {"action": "open_app", "app": "chrome"}
+Depois de usar as ferramentas, responda em uma ou duas frases curtas dizendo o
+que foi feito. Sua resposta é falada em voz alta, então escreva como se fosse
+falar: sem listas, sem markdown, sem emojis, sem URLs soletradas.
 
-2. open_url — para abrir um site específico
-   Exemplo: {"action": "open_url", "url": "https://github.com"}
+APLICATIVOS DISPONÍVEIS:
+{", ".join(sorted(APPS))}
 
-3. youtube_search — para pesquisar no YouTube
-   Exemplo: {"action": "youtube_search", "query": "lofi hip hop"}
+PROJETOS DISPONÍVEIS:
+{", ".join(sorted(PASTAS))}
 
-4. google_search — para pesquisar no Google
-   Exemplo: {"action": "google_search", "query": "previsão do tempo hoje"}
+Se o senhor pedir algo fora dessas listas, diga que não está cadastrado em vez
+de adivinhar um nome parecido.
 
-5. speak — para responder perguntas ou dar informações
-   Exemplo: {"action": "speak", "text": "Claro, senhor. São Paulo é a maior cidade do Brasil."}
+CONTEXTO DA CONVERSA:
+Você recebe as mensagens anteriores desta sessão. Quando o senhor disser "ele",
+"isso", "lá", "de novo" ou "agora", olhe o histórico para descobrir a que ele
+se refere. Se continuar ambíguo, pergunte.
 
-6. bom_dia — quando o usuário disser "bom dia", "boa tarde" ou "boa noite"
-   Exemplo: {"action": "bom_dia"}
-
-7. open_folder — para abrir uma pasta de projeto no VSCode
-   Exemplo: {"action": "open_folder", "folder": "kronos"}
-
-8. tarefas_hoje — quando o usuário perguntar sobre tarefas, agenda ou o que fazer hoje
-   Exemplo: {"action": "tarefas_hoje"}
-
-Regras:
-- APENAS JSON, sem texto antes ou depois
-- No campo "text" do speak, use frases no estilo Jarvis:
-  "Imediatamente, senhor.", "Claro, senhor.", "Feito, senhor.",
-  "À sua disposição, senhor.", "Posso sugerir...", "Sistemas operacionais, senhor."
-- Para perguntas gerais, use "speak"
-- Para "bom dia", "boa tarde" ou "boa noite", use "bom_dia"
-- Para "pesquisa X no YouTube" ou "abre X no YouTube", use youtube_search
-- Para "pesquisa X", "busca X" ou "procura X", use google_search
-- Nomes de apps no campo "app" devem ser em minúsculas
-- Responda sempre em português brasileiro
+Responda sempre em português brasileiro.
 """
 
 
@@ -336,166 +350,221 @@ def ouvir_microfone() -> str | None:
         return None
 
 
-def obter_comando_claude(texto_usuario: str) -> dict | None:
-    """
-    Manda o comando do usuário pro Claude e recebe o JSON de ação.
+# =============================================================================
+# FERRAMENTAS DO JARVIS
+# =============================================================================
+# Cada função abaixo é uma ferramenta que o Claude pode chamar sozinho.
+#
+# O decorador @beta_tool lê a assinatura e o docstring da função e monta o
+# schema JSON automaticamente:
+#   - a primeira parte do docstring vira a DESCRIÇÃO (é por ela que o Claude
+#     decide se aquela ferramenta serve pro pedido — por isso ela diz
+#     explicitamente QUANDO usar)
+#   - a seção "Args:" vira a descrição de cada parâmetro
+#
+# Toda ferramenta devolve uma STRING descrevendo o que aconteceu. Essa string
+# volta pro Claude, que a usa pra compor a resposta falada. Quando algo dá
+# errado, devolvemos o erro como texto em vez de levantar exceção — assim o
+# Claude entende a falha e pode se explicar ou tentar outro caminho.
 
-    Usa claude-haiku-4-5 porque:
-    - É o modelo mais rápido e barato da Anthropic
-    - Para classificar comandos simples, não precisa de um modelo grande
-    - Latência menor = resposta mais ágil
 
-    max_tokens=200: JSON de ação é pequeno, 200 tokens é mais que suficiente
+@beta_tool
+def abrir_aplicativo(app: str) -> str:
+    """Abre um aplicativo instalado no computador do senhor.
+
+    Use quando ele pedir para abrir, iniciar ou executar um programa.
+    Para sites use abrir_site; para pastas de projeto use abrir_pasta_de_projeto.
+
+    Args:
+        app: Nome do aplicativo em minúsculas, exatamente como aparece na
+            lista de aplicativos disponíveis.
     """
+    caminho = APPS.get(app.lower().strip())
+    if not caminho:
+        return f"O aplicativo '{app}' não está cadastrado na lista de aplicativos."
+
     try:
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            system=SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": texto_usuario}
-            ]
+        # os.path.expandvars resolve %USERNAME% e outras variáveis do Windows
+        subprocess.Popen([os.path.expandvars(caminho)])
+        return f"Aplicativo '{app}' aberto."
+    except FileNotFoundError:
+        return f"'{app}' está cadastrado, mas o executável não existe em {caminho}."
+    except Exception as e:
+        return f"Falha ao abrir '{app}': {e}"
+
+
+@beta_tool
+def abrir_site(url: str) -> str:
+    """Abre um endereço da web no navegador padrão.
+
+    Use quando o senhor citar um site ou endereço específico.
+    Para buscar um assunto na internet, use pesquisar_no_google.
+
+    Args:
+        url: Endereço do site, por exemplo github.com
+    """
+    url = url.strip()
+    if not url:
+        return "Nenhum endereço foi informado."
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    webbrowser.open(url)
+    return f"Site {url} aberto no navegador."
+
+
+@beta_tool
+def pesquisar_no_youtube(busca: str) -> str:
+    """Abre uma pesquisa no YouTube.
+
+    Use para pedidos de vídeo ou música, ou quando ele mencionar o YouTube.
+
+    Args:
+        busca: O que pesquisar, por exemplo "lofi hip hop".
+    """
+    # quote_plus codifica a busca pra URL: "ia generativa" vira "ia+generativa"
+    webbrowser.open(f"https://www.youtube.com/results?search_query={quote_plus(busca)}")
+    return f"Pesquisa por '{busca}' aberta no YouTube."
+
+
+@beta_tool
+def pesquisar_no_google(busca: str) -> str:
+    """Abre uma pesquisa no Google.
+
+    Use quando o senhor pedir para pesquisar, buscar ou procurar algo.
+    Se você já sabe a resposta, responda direto em vez de usar esta ferramenta.
+
+    Args:
+        busca: O que pesquisar.
+    """
+    webbrowser.open(f"https://www.google.com/search?q={quote_plus(busca)}")
+    return f"Pesquisa por '{busca}' aberta no Google."
+
+
+@beta_tool
+def abrir_pasta_de_projeto(pasta: str) -> str:
+    """Abre uma pasta de projeto no VS Code.
+
+    Use quando o senhor citar um dos projetos da lista de projetos disponíveis.
+
+    Args:
+        pasta: Nome do projeto em minúsculas, como na lista de projetos
+            disponíveis.
+    """
+    caminho = PASTAS.get(pasta.lower().strip())
+    if not caminho:
+        return f"O projeto '{pasta}' não está cadastrado na lista de projetos."
+
+    try:
+        subprocess.Popen(["code", caminho])
+    except FileNotFoundError:
+        # 'code' não está no PATH — tenta pelo caminho completo do VS Code
+        vscode = os.path.expandvars(
+            r"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe"
         )
+        try:
+            subprocess.Popen([vscode, caminho])
+        except Exception as e:
+            return f"Não consegui abrir o VS Code: {e}"
 
-        # response.content é uma lista de blocos — pegamos o texto do primeiro
-        resposta_texto = response.content[0].text.strip()
+    return f"Projeto '{pasta}' aberto no VS Code."
 
-        # Remove blocos de código markdown se o Claude os incluir (ex: ```json ... ```)
-        if resposta_texto.startswith("```"):
-            linhas = resposta_texto.split("\n")
-            # Remove primeira linha (```json) e última (```)
-            resposta_texto = "\n".join(linhas[1:-1])
 
-        # json.loads() converte a string JSON em dicionário Python
-        return json.loads(resposta_texto)
+@beta_tool
+def hora_e_clima() -> str:
+    """Informa a hora atual de Brasília e o clima em Goiânia.
 
-    except json.JSONDecodeError:
-        # Claude retornou algo que não é JSON válido
-        print(f"[ERRO] JSON inválido recebido: {resposta_texto}")
-        return None
+    Use quando o senhor cumprimentar (bom dia, boa tarde, boa noite) ou
+    perguntar as horas, a temperatura, o clima ou se vai chover.
+    """
+    return bom_dia_jarvis()
+
+
+@beta_tool
+def tarefas_de_hoje() -> str:
+    """Consulta as tarefas pendentes de hoje no Kronos.
+
+    Use quando o senhor perguntar sobre tarefas, agenda, compromissos
+    ou o que ele precisa fazer hoje.
+    """
+    return buscar_tarefas_hoje()
+
+
+# Lista entregue ao Claude a cada chamada. Para criar uma ferramenta nova,
+# escreva a função com @beta_tool acima e acrescente o nome dela aqui — não
+# é preciso mexer no system prompt nem em mais nada.
+FERRAMENTAS = [
+    abrir_aplicativo,
+    abrir_site,
+    pesquisar_no_youtube,
+    pesquisar_no_google,
+    abrir_pasta_de_projeto,
+    hora_e_clima,
+    tarefas_de_hoje,
+]
+
+
+# =============================================================================
+# PROCESSAMENTO DO COMANDO
+# =============================================================================
+
+def processar_comando(texto_usuario: str) -> None:
+    """
+    Manda o comando pro Claude, executa as ferramentas que ele pedir e fala
+    a resposta final.
+
+    O tool_runner cuida do ciclo inteiro: chama a API, vê que o Claude quer
+    usar ferramentas, executa as funções, devolve os resultados e repete até
+    o Claude parar de pedir ferramentas. `until_done()` roda tudo isso e
+    entrega só a mensagem final.
+
+    max_iterations=8 é uma trava de segurança: mesmo que algo dê errado, o
+    ciclo não roda pra sempre.
+    """
+    global historico
+
+    # Histórico anterior + a pergunta nova. Só gravamos no `historico` depois
+    # que der certo — senão uma falha de rede deixaria uma pergunta órfã.
+    mensagens = historico + [{"role": "user", "content": texto_usuario}]
+
+    try:
+        runner = client.beta.messages.tool_runner(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system=SYSTEM_PROMPT,
+            tools=FERRAMENTAS,
+            messages=mensagens,
+            max_iterations=8,
+        )
+        resposta = runner.until_done()
     except anthropic.APIError as e:
         print(f"[ERRO] Falha na API da Anthropic: {e}")
-        return None
+        falar("Não consegui completar o pedido, senhor.")
+        return
 
+    # A resposta final pode vir em vários blocos de texto — junta todos.
+    # Blocos que não são de texto (tool_use, por exemplo) são ignorados aqui.
+    texto_final = "".join(
+        bloco.text for bloco in resposta.content if bloco.type == "text"
+    ).strip()
 
-def executar_acao(acao: dict) -> None:
-    """
-    Recebe o dicionário de ação do Claude e executa o comando correspondente.
+    if not texto_final:
+        texto_final = "Feito, senhor."
 
-    Este é o "executor" do Jarvis. Claude decide O QUE fazer,
-    esta função decide COMO fazer.
-    """
-    action = acao.get("action", "").lower()
+    falar(texto_final)
 
-    # -----------------------------------------------------------------
-    # ACTION: open_app — abre um aplicativo instalado
-    # -----------------------------------------------------------------
-    if action == "open_app":
-        app_nome = acao.get("app", "").lower()
-        app_path = APPS.get(app_nome)
+    # Guarda só o texto da conversa (pergunta e resposta falada). Os blocos
+    # de tool_use/tool_result ficam de fora de propósito: manter o histórico
+    # como pares user/assistant simples deixa o corte abaixo trivial e seguro.
+    historico.append({"role": "user", "content": texto_usuario})
+    historico.append({"role": "assistant", "content": texto_final})
 
-        if app_path:
-            try:
-                # os.path.expandvars: resolve %USERNAME% e outras variáveis
-                app_path = os.path.expandvars(app_path)
-                # subprocess.Popen: abre o processo sem bloquear o Jarvis
-                subprocess.Popen([app_path])
-                falar(f"Abrindo {app_nome}.")
-            except FileNotFoundError:
-                falar(f"Aplicativo não encontrado: {app_nome}")
-            except Exception as e:
-                falar("Não consegui abrir o aplicativo.")
-                print(f"[ERRO] {e}")
-        else:
-            # App não está no nosso dicionário APPS
-            falar(f"Aplicativo não encontrado: {app_nome}")
-
-    # -----------------------------------------------------------------
-    # ACTION: open_url — abre uma URL no navegador padrão
-    # -----------------------------------------------------------------
-    elif action == "open_url":
-        url = acao.get("url", "")
-        if url:
-            # Garante que a URL tem protocolo (https://)
-            if not url.startswith(("http://", "https://")):
-                url = "https://" + url
-            webbrowser.open(url)
-            falar(f"Abrindo o site.")
-        else:
-            falar("URL não especificada.")
-
-    # -----------------------------------------------------------------
-    # ACTION: youtube_search — pesquisa no YouTube
-    # -----------------------------------------------------------------
-    elif action == "youtube_search":
-        query = acao.get("query", "")
-        if query:
-            # quote_plus: codifica a query para URL
-            # ex: "inteligência artificial" → "intelig%C3%AAncia+artificial"
-            url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-            webbrowser.open(url)
-            falar(f"Pesquisando {query} no YouTube.")
-        else:
-            falar("O que você quer pesquisar no YouTube?")
-
-    # -----------------------------------------------------------------
-    # ACTION: google_search — pesquisa no Google
-    # -----------------------------------------------------------------
-    elif action == "google_search":
-        query = acao.get("query", "")
-        if query:
-            url = f"https://www.google.com/search?q={quote_plus(query)}"
-            webbrowser.open(url)
-            falar(f"Pesquisando {query} no Google.")
-        else:
-            falar("O que você quer pesquisar?")
-
-    # -----------------------------------------------------------------
-    # ACTION: speak — responde em voz e texto
-    # -----------------------------------------------------------------
-    elif action == "speak":
-        texto = acao.get("text", "Não tenho resposta para isso.")
-        falar(texto)
-
-    # -----------------------------------------------------------------
-    # ACTION: bom_dia — saudação com hora e clima real
-    # -----------------------------------------------------------------
-    # ACTION: open_folder — abre pasta no VSCode
-    # -----------------------------------------------------------------
-    elif action == "open_folder":
-        folder_nome = acao.get("folder", "").lower()
-        folder_path = PASTAS.get(folder_nome)
-
-        if folder_path:
-            try:
-                subprocess.Popen(["code", folder_path])
-                falar(f"Abrindo {folder_nome} no VSCode, senhor.")
-            except FileNotFoundError:
-                # 'code' não está no PATH — tenta pelo caminho completo
-                vscode = os.path.expandvars(
-                    r"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe"
-                )
-                subprocess.Popen([vscode, folder_path])
-                falar(f"Abrindo {folder_nome} no VSCode, senhor.")
-        else:
-            falar(f"Pasta {folder_nome} não encontrada, senhor.")
-
-    # -----------------------------------------------------------------
-    elif action == "bom_dia":
-        falar(bom_dia_jarvis())
-
-    # -----------------------------------------------------------------
-    # ACTION: tarefas_hoje — busca tarefas do Kronos
-    # -----------------------------------------------------------------
-    elif action == "tarefas_hoje":
-        falar(buscar_tarefas_hoje())
-
-    # -----------------------------------------------------------------
-    # ACTION desconhecida
-    # -----------------------------------------------------------------
-    else:
-        falar("Não sei como executar essa ação.")
-        print(f"[AVISO] Action desconhecida: {action}")
+    # Descarta as trocas mais antigas. Como sempre gravamos em pares, cortar
+    # um número par pelo fim garante que o histórico continue começando com
+    # "user" — que é o que a API exige.
+    if len(historico) > MAX_TROCAS * 2:
+        historico = historico[-(MAX_TROCAS * 2):]
 
 
 def buscar_tarefas_hoje() -> str:
@@ -603,11 +672,25 @@ def bom_dia_jarvis() -> str:
 def eh_comando_saida(texto: str) -> bool:
     """
     Verifica se o usuário quer encerrar o programa.
-    Comparação simples por palavras-chave — não precisa do Claude para isso.
+
+    Compara a FRASE INTEIRA, não pedaço dela. Antes isso usava
+    `palavra in texto`, o que fazia "fechar o chrome" e "desligar o monitor"
+    encerrarem o Jarvis — porque "fechar" e "desligar" apareciam dentro deles.
+
+    Por isso "fechar"/"desligar" sozinhos não estão na lista: são ambíguos.
+    Só contam quando o usuário diz explicitamente que é o Jarvis.
     """
-    palavras_saida = {"sair", "encerrar", "tchau", "fechar", "desligar", "exit", "quit"}
-    # any(): retorna True se qualquer palavra estiver no texto
-    return any(palavra in texto.lower() for palavra in palavras_saida)
+    FRASES_SAIDA = {
+        "sair", "sai", "encerrar", "encerra", "exit", "quit",
+        "tchau", "xau", "adeus", "falou", "até mais", "ate mais",
+        "fechar jarvis", "fecha o jarvis", "fechar o jarvis",
+        "desligar jarvis", "desliga o jarvis", "desligar o jarvis",
+        "encerrar jarvis", "encerra o jarvis",
+    }
+
+    # Tira espaços das pontas e pontuação (ex: "tchau!" vira "tchau")
+    texto_limpo = texto.lower().strip().strip(".,!?;:")
+    return texto_limpo in FRASES_SAIDA
 
 
 # =============================================================================
@@ -623,43 +706,129 @@ ACDC_MUSICAS = [
     ("Hells Bells",      "https://www.youtube.com/watch?v=etAIpkdhU9Q"),
 ]
 
+class DetectorDePalma:
+    """
+    Distingue palma de fala pelo FORMATO do som, não só pelo volume.
+
+    Uma palma é um transiente: sai do silêncio, estoura e some — tudo em
+    menos de 100 ms. Fala é sustentada: o volume fica alto por vários
+    décimos de segundo seguidos, e cai só nas pausas entre as palavras.
+
+    A versão antiga olhava apenas "o volume passou do limiar?". Como o
+    intervalo entre duas palavras faladas (0,1 s a 0,8 s) é exatamente a
+    janela usada para "duas palmas", qualquer frase disparava a música.
+
+    Por isso um estouro só conta como palma quando cumpre as DUAS condições:
+      1. vem depois de um silêncio (a fala emenda uma sílaba na outra)
+      2. termina rápido (a fala se sustenta por muito mais tempo)
+
+    A classe é separada da captura de áudio de propósito: assim dá para
+    testar a lógica com sequências de volume sem precisar de microfone.
+    """
+
+    def __init__(self, limiar: float, chunk_s: float,
+                 janela: float, cooldown: float):
+        self.LIMIAR = limiar
+        # Histerese: para SAIR do estouro exigimos um volume bem menor do que
+        # para ENTRAR. Sem isso o volume fica oscilando em torno do limiar.
+        self.LIMIAR_BAIXO = limiar * 0.4
+        self.JANELA = janela
+        self.COOLDOWN = cooldown
+
+        # Um estouro de até ~120 ms é transiente (palma). Mais que isso é fala.
+        self.MAX_CHUNKS_BURST = max(1, int(0.12 / chunk_s))
+        # Exige ~150 ms de silêncio antes do estouro.
+        self.MIN_CHUNKS_SILENCIO = max(1, int(0.15 / chunk_s))
+
+        self.chunks_silencio = self.MIN_CHUNKS_SILENCIO
+        self.em_burst = False
+        self.chunks_burst = 0
+        self.inicio_burst = 0.0
+        # -inf = "nunca aconteceu". Zerar aqui faria o cooldown bloquear os
+        # primeiros segundos sempre que a base de tempo começasse perto de zero.
+        self.ultima_palma = float("-inf")
+        self.ultimo_disparo = float("-inf")
+
+    def processa(self, volume: float, agora: float) -> bool:
+        """Consome um pedaço de áudio. Devolve True no par de palmas."""
+        if self.em_burst:
+            if volume > self.LIMIAR_BAIXO:
+                self.chunks_burst += 1
+                if self.chunks_burst > self.MAX_CHUNKS_BURST:
+                    # Comprido demais: é fala ou ruído contínuo. Descarta.
+                    self.em_burst = False
+                    self.chunks_silencio = 0
+                return False
+
+            # Acabou dentro do tempo — transiente confirmado
+            self.em_burst = False
+            self.chunks_silencio = 0
+            return self._registrar(self.inicio_burst)
+
+        if volume > self.LIMIAR:
+            if self.chunks_silencio >= self.MIN_CHUNKS_SILENCIO:
+                self.em_burst = True
+                self.chunks_burst = 1
+                self.inicio_burst = agora
+            else:
+                # Estouro sem silêncio antes: fala emendada. Ignora.
+                self.chunks_silencio = 0
+            return False
+
+        if volume < self.LIMIAR_BAIXO:
+            self.chunks_silencio += 1
+        else:
+            self.chunks_silencio = 0
+        return False
+
+    def _registrar(self, quando: float) -> bool:
+        """Guarda a palma e avisa quando fecharam duas dentro da janela."""
+        if quando - self.ultimo_disparo < self.COOLDOWN:
+            return False
+
+        intervalo = quando - self.ultima_palma
+        if 0.08 < intervalo < self.JANELA:
+            self.ultima_palma = float("-inf")   # par consumido, recomeça
+            self.ultimo_disparo = quando
+            return True
+
+        self.ultima_palma = quando
+        return False
+
+
 def detectar_palma():
     """
     Roda em background e monitora o microfone continuamente.
     O callback APENAS detecta e envia para uma fila — nunca executa ações.
     Uma thread separada consome a fila e executa falar() + webbrowser.
     Isso evita conflitos com o sounddevice.
+
+    Para calibrar o limiar no seu microfone, rode com JARVIS_DEBUG_PALMA=1:
+    o volume de cada pedaço é impresso, então dá pra ver quanto marca uma
+    palma e quanto marca a sua voz.
     """
-    CHUNK = 0.05
+    CHUNK = 0.01       # 10 ms — resolução fina o bastante pra medir o estouro
     SAMPLE_RATE = 16000
     LIMIAR = 2500      # aumente se disparar com barulho de fundo
     JANELA = 0.8       # tempo máximo entre as duas palmas (segundos)
     COOLDOWN = 4.0     # segundos de bloqueio após tocar música
 
+    DEBUG = os.environ.get("JARVIS_DEBUG_PALMA") == "1"
+
     fila = queue.Queue()
-    ultima_palma = [0]
-    ultimo_disparo = [0]
+    detector = DetectorDePalma(LIMIAR, CHUNK, JANELA, COOLDOWN)
 
     def callback(indata, frames, time_info, status):
         if jarvis_falando.is_set():
             return
 
-        volume = np.sqrt(np.mean(indata.astype(np.float32) ** 2))
+        volume = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
 
-        if volume > LIMIAR:
-            agora = time.time()
+        if DEBUG and volume > LIMIAR * 0.4:
+            print(f"[palma:debug] volume={volume:7.0f} limiar={LIMIAR}")
 
-            # Ignora se ainda está no cooldown pós-música
-            if agora - ultimo_disparo[0] < COOLDOWN:
-                return
-
-            intervalo = agora - ultima_palma[0]
-            if 0.1 < intervalo < JANELA:
-                fila.put("palma")       # envia sinal para a thread executora
-                ultima_palma[0] = 0
-                ultimo_disparo[0] = agora
-            else:
-                ultima_palma[0] = agora
+        if detector.processa(volume, time.time()):
+            fila.put("palma")   # envia sinal para a thread executora
 
     def executor():
         musica_index = 0
@@ -742,16 +911,11 @@ def main():
             falar("Até mais!")
             break
 
-        # ----- Processa com Claude -----
+        # ----- Processa com Claude e executa as ferramentas -----
+        # processar_comando faz tudo: chama a API, executa as ferramentas
+        # que o Claude pedir e fala a resposta final.
         print(f"[Processando] '{comando}'")
-        acao = obter_comando_claude(comando)
-
-        if acao is None:
-            falar("Não entendi o comando, tente novamente.")
-            continue
-
-        # ----- Executa a ação -----
-        executar_acao(acao)
+        processar_comando(comando)
 
 
 # =============================================================================

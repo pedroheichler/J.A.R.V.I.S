@@ -1,4 +1,27 @@
+# Cérebro — interpreta os comandos e chama as ferramentas
 anthropic
+
+# Configuração — lê o arquivo .env
+python-dotenv
+
+# Reconhecimento de voz (usa a Google Speech API por baixo)
 SpeechRecognition
+
+# Áudio — captura do microfone e reprodução da fala
+# sounddevice substitui o pyaudio, que não tem wheel pré-compilado
+sounddevice
+numpy
+scipy
+
+# Text-to-speech, em ordem de preferência
+fish-audio-sdk
+edge-tts
 pyttsx3
-pyaudio
+
+# Integração com o Kronos
+supabase
+
+# Banco de fusos horários IANA.
+# Obrigatório no Windows: o sistema não tem a base que o zoneinfo usa, e sem
+# isso o ZoneInfo("America/Sao_Paulo") do "bom dia" falha. No Linux é inofensivo.
+tzdata
