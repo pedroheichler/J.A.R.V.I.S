@@ -273,6 +273,10 @@ TAMANHO_MINIMO_SEMELHANCA = 4
 # conversa alheia e contra a própria voz. Ver parece_eco() e main().
 EXIGIR_NOME = bool(CONFIG.get("exigir_nome", True))
 
+# Qual reconhecedor de fala usar: "whisper" (local, aceita vocabulário) ou
+# "google" (gratuito, mas erra nomes próprios). Ver transcrever_whisper().
+RECONHECIMENTO = CONFIG.get("reconhecimento", "whisper").lower()
+
 
 # =============================================================================
 # SYSTEM PROMPT DO CLAUDE
@@ -513,7 +517,6 @@ def falar(texto: str) -> None:
         # Pequena folga pro alto-falante silenciar antes de reabrir o microfone
         time.sleep(0.5)
         jarvis_falando.clear()  # desativa
-    jarvis_falando.clear()
 
 
 def volume_rms(bloco) -> float:
@@ -606,6 +609,92 @@ class DetectorDeFala:
         return self.estado
 
 
+# =============================================================================
+# RECONHECIMENTO DE FALA
+# =============================================================================
+# Duas opções, escolhidas pelo "reconhecimento" no config.json:
+#
+#   "whisper" — roda na máquina, offline. Aceita uma DICA de vocabulário, e é
+#               isso que resolve o problema dos nomes próprios: sem a dica,
+#               "Kronos" vira "Cronos" e "Nexpeed" vira "Netflix", tanto no
+#               Whisper quanto no Google. Com a dica, acerta os dois.
+#   "google"  — o serviço gratuito. Bom em fala comum, mas não tem como
+#               receber vocabulário, então erra nome próprio sempre.
+#
+# O primeiro uso baixa o modelo (~470 MB no "small"). Se algo falhar, o
+# Google entra como reserva e o assistente continua funcionando.
+
+_whisper = None  # carregado uma vez, na primeira transcrição
+
+
+def montar_dica_vocabulario() -> str:
+    """
+    Monta a frase de contexto que o Whisper usa para se orientar.
+
+    Sai do próprio config.json: os apps, os projetos e o nome do assistente
+    que o senhor cadastrou. Cadastrou um projeto novo, o reconhecimento já
+    passa a acertar o nome dele — sem tocar em código.
+    """
+    partes = [f"Comandos de voz para o assistente {NOME_ATIVACAO.capitalize()}."]
+
+    if NOMES_PASTAS:
+        partes.append(f"Projetos: {', '.join(NOMES_PASTAS)}.")
+    if NOMES_APPS:
+        partes.append(f"Aplicativos: {', '.join(NOMES_APPS)}.")
+
+    partes.append("Abrir, pesquisar, tocar, tarefas, clima, horas.")
+    return " ".join(partes)
+
+
+def carregar_whisper():
+    """Carrega o modelo na primeira vez e reaproveita nas seguintes."""
+    global _whisper
+    if _whisper is not None:
+        return _whisper
+
+    from faster_whisper import WhisperModel
+
+    tamanho = CONFIG.get("modelo_whisper", "small")
+    print(f"[Reconhecimento] Carregando Whisper '{tamanho}'... "
+          f"(demora só na primeira vez)")
+
+    # int8 na CPU: bem mais rápido que float32, com perda de qualidade
+    # que não se nota em comando de voz curto.
+    _whisper = WhisperModel(tamanho, device="cpu", compute_type="int8")
+    print("[Reconhecimento] Pronto.")
+    return _whisper
+
+
+def transcrever_whisper(wav_buffer: io.BytesIO) -> str | None:
+    """Transcreve com o Whisper local, orientado pelo vocabulário do config."""
+    modelo = carregar_whisper()
+
+    segmentos, _ = modelo.transcribe(
+        wav_buffer,
+        language="pt",
+        # beam_size: quantas hipóteses ele considera. 1 é ~12% mais rápido e
+        # empatou nos testes com áudio limpo, mas 5 se sai melhor com ruído
+        # de sala — que é o caso real aqui.
+        beam_size=int(CONFIG.get("whisper_beam_size", 5)),
+        # A dica. É o que faz o Whisper escrever "Kronos" em vez de "Cronos".
+        initial_prompt=montar_dica_vocabulario(),
+        # Corta silêncio antes de transcrever — evita alucinação em áudio
+        # que ficou quase mudo.
+        vad_filter=True,
+    )
+
+    texto = " ".join(s.text for s in segmentos).strip()
+    return texto or None
+
+
+def transcrever_google(wav_buffer: io.BytesIO) -> str | None:
+    """Transcreve pelo serviço gratuito do Google (a reserva)."""
+    with sr.AudioFile(wav_buffer) as fonte:
+        audio = recognizer.record(fonte)
+    # language="pt-BR": reconhecimento em português do Brasil
+    return recognizer.recognize_google(audio, language="pt-BR")
+
+
 def ouvir_microfone() -> str | None:
     """
     Captura áudio do microfone e converte em texto usando Google Speech API.
@@ -692,25 +781,37 @@ def ouvir_microfone() -> str | None:
     if DEBUG:
         print(f"[fala:debug] gravado {len(audio_data) / SAMPLE_RATE:.1f}s")
 
-    # Salva o áudio gravado num arquivo WAV temporário em memória
-    # SpeechRecognition precisa de um arquivo WAV para processar
+    # Salva o áudio gravado num arquivo WAV em memória — é o formato que os
+    # dois reconhecedores esperam receber.
     buffer = io.BytesIO()
     wav.write(buffer, SAMPLE_RATE, audio_data)
-    buffer.seek(0)  # volta ao início do buffer para leitura
+    buffer.seek(0)
 
-    try:
-        with sr.AudioFile(buffer) as source:
-            audio = recognizer.record(source)
+    texto = None
 
-        # language="pt-BR": reconhecimento em português do Brasil
-        texto = recognizer.recognize_google(audio, language="pt-BR")
-        print(f"[Você disse] {texto}")
-        return texto.lower().strip()
-    except sr.UnknownValueError:
+    if RECONHECIMENTO == "whisper":
+        try:
+            texto = transcrever_whisper(buffer)
+        except Exception as e:
+            # Modelo não baixou, memória insuficiente, disco cheio... Não vale
+            # derrubar o assistente: o Google assume e a vida continua.
+            print(f"[AVISO] Whisper falhou, usando o Google: {e}")
+            buffer.seek(0)
+
+    if texto is None:
+        try:
+            texto = transcrever_google(buffer)
+        except sr.UnknownValueError:
+            return None          # ouviu som, mas não era fala inteligível
+        except sr.RequestError as e:
+            print(f"[ERRO] Falha na API de voz: {e}")
+            return None
+
+    if not texto:
         return None
-    except sr.RequestError as e:
-        print(f"[ERRO] Falha na API de voz: {e}")
-        return None
+
+    print(f"[Você disse] {texto}")
+    return texto.lower().strip()
 
 
 # =============================================================================

@@ -1,20 +1,24 @@
 """
-ESCOLHEDOR DE VOZ
-=================
+ESCOLHEDOR DE VOZ (Fish Audio)
+==============================
 
-Lista as vozes disponíveis na Fish Audio, deixa você OUVIR cada uma e mostra
-o identificador para colar no config.json.
+Navega pelo catálogo de vozes da Fish Audio, deixa você OUVIR cada uma e
+grava a escolhida direto no config.json.
 
 Como usar:
-    python vozes.py              procura vozes em português
-    python vozes.py jarvis       procura por um termo
-    python vozes.py --minhas     só as vozes que você mesmo criou
-    python vozes.py --edge       as vozes gratuitas do Edge TTS
+    python vozes.py                 vozes em português, mais usadas primeiro
+    python vozes.py --novas         as mais recentes
+    python vozes.py --minhas        só as vozes que você mesmo clonou
+    python vozes.py --edge          as vozes gratuitas do Edge TTS (reserva)
 
-Não altera nada sozinho: só mostra e toca.
+Dentro do programa:
+    5           ouve a voz número 5
+    s 5         salva a voz 5 no config.json
+    n / p       página seguinte / anterior
+    b <termo>   busca por nome
+    q           sai
 """
 import asyncio
-import io
 import json
 import os
 import sys
@@ -26,27 +30,55 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PASTA = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(PASTA, "config.json")
 FRASE = "Bom dia, senhor. Todos os sistemas estão operacionais."
+POR_PAGINA = 15
 
 
-def config_atual() -> dict:
-    """Lê o config.json para marcar qual voz está em uso."""
-    caminho = os.path.join(PASTA, "config.json")
-    if not os.path.exists(caminho):
+# ------------------------------------------------------------------ config
+def ler_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
         return {}
     try:
-        with open(caminho, encoding="utf-8") as f:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
             return json.load(f)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        print(f"[AVISO] config.json inválido ({e}) — não vou poder salvar.")
         return {}
 
 
-def tocar_pcm(amostras: np.ndarray, taxa: int) -> None:
+def salvar_voz(chave: str, valor: str, titulo: str) -> None:
+    """Grava a voz escolhida no config.json, preservando o resto."""
+    if not os.path.exists(CONFIG_PATH):
+        print("  config.json não existe. Copie o config.example.json primeiro.")
+        return
+
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"  config.json está com JSON inválido ({e}). Corrija antes.")
+        return
+
+    anterior = cfg.get(chave, "(nenhuma)")
+    cfg[chave] = valor
+
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+
+    print(f"\n  Salvo em config.json:")
+    print(f"     {chave}: {anterior}")
+    print(f"          -> {valor}   ({titulo})")
+    print("  Reinicie o assistente para a voz nova valer.\n")
+
+
+def tocar(amostras: np.ndarray, taxa: int) -> None:
     sd.play(amostras, samplerate=taxa)
     sd.wait()
 
 
-# --------------------------------------------------------------- Fish Audio
+# -------------------------------------------------------------- Fish Audio
 def ouvir_fish(sessao, voz_id: str) -> None:
     import fish_audio_sdk as fish
 
@@ -57,69 +89,115 @@ def ouvir_fish(sessao, voz_id: str) -> None:
         amostras = np.frombuffer(dados, dtype=np.int16)
         amostras = np.clip(amostras * 2.5, -32768, 32767).astype(np.int16)
         print(" tocando")
-        tocar_pcm(amostras, 44100)
+        tocar(amostras, 44100)
     except Exception as e:
         print(f" falhou: {e}")
 
 
-def modo_fish(termo: str | None, so_minhas: bool) -> None:
+def mostrar_pagina(vozes, pagina, total, em_uso) -> None:
+    ultima = (total + POR_PAGINA - 1) // POR_PAGINA
+    print(f"\n  página {pagina} de {ultima}   ({total} vozes no total)\n")
+    for i, v in enumerate(vozes, 1):
+        marca = "  <<< EM USO" if v.id == em_uso else ""
+        idiomas = ",".join(v.languages or [])
+        print(f"  [{i:>2}] {(v.title or '?')[:44]:<46} {idiomas:<7} "
+              f"usos {v.task_count or 0:<7}{marca}")
+
+
+def modo_fish(sort_by: str, so_minhas: bool) -> None:
     import fish_audio_sdk as fish
 
     chave = os.environ.get("FISH_AUDIO_API_KEY")
     if not chave:
-        print("FISH_AUDIO_API_KEY não está no .env — sem acesso à Fish Audio.")
+        print("FISH_AUDIO_API_KEY não está no .env.")
         print("Use `python vozes.py --edge` para as vozes gratuitas.")
         return
 
     sessao = fish.Session(chave)
-    em_uso = config_atual().get("voz_fish", "")
+    em_uso = ler_config().get("voz_fish", "")
 
-    filtros = {"page_size": 20}
-    if so_minhas:
-        filtros["self_only"] = True
-    elif termo:
-        filtros["title"] = termo
-    else:
-        filtros["language"] = "pt"
+    pagina, busca = 1, None
 
-    try:
-        resposta = sessao.list_models(**filtros)
-    except Exception as e:
-        print(f"Falha ao consultar a Fish Audio: {e}")
-        return
-
-    vozes = list(getattr(resposta, "items", []) or [])
-    if not vozes:
-        print("Nenhuma voz encontrada com esse filtro.")
-        if so_minhas:
-            print("Você ainda não criou vozes próprias em fish.audio.")
-        return
-
-    print(f"\n{len(vozes)} voz(es) encontrada(s):\n")
-    for i, v in enumerate(vozes, 1):
-        marca = "  <<< EM USO" if v.id == em_uso else ""
-        idiomas = ",".join(v.languages or [])
-        print(f"  [{i:>2}] {v.title[:40]:<42} {idiomas:<8} "
-              f"♥{v.like_count or 0}{marca}")
-        print(f"       {v.id}")
-
-    print("\nDigite o número para OUVIR, ou Enter para sair.")
     while True:
+        filtros = {"page_size": POR_PAGINA, "page_number": pagina,
+                   "sort_by": sort_by}
+        if so_minhas:
+            filtros["self_only"] = True
+        elif busca:
+            filtros["title"] = busca
+        else:
+            filtros["language"] = "pt"
+
         try:
-            escolha = input("→ ").strip()
+            resposta = sessao.list_models(**filtros)
+        except Exception as e:
+            print(f"Falha ao consultar a Fish Audio: {e}")
+            return
+
+        vozes = list(resposta.items or [])
+        total = resposta.total or 0
+
+        if not vozes:
+            print("\n  Nenhuma voz nesta página." if pagina > 1
+                  else "\n  Nenhuma voz encontrada.")
+            if so_minhas:
+                print("  Você ainda não clonou nenhuma voz em fish.audio.")
+                return
+            if pagina > 1:
+                pagina -= 1
+                continue
+            return
+
+        titulo = ("suas vozes" if so_minhas
+                  else f"busca: {busca!r}" if busca
+                  else "vozes em português")
+        print("\n" + "=" * 70)
+        print(f"  {titulo}")
+        print("=" * 70)
+        mostrar_pagina(vozes, pagina, total, em_uso)
+
+        print("\n  número = ouvir | s <n> = salvar | n/p = página | "
+              "b <termo> = buscar | q = sair")
+        try:
+            entrada = input("  → ").strip()
         except (EOFError, KeyboardInterrupt):
             return
-        if not escolha:
+
+        if not entrada or entrada.lower() == "q":
             return
-        if not escolha.isdigit() or not (1 <= int(escolha) <= len(vozes)):
-            print("  número inválido")
+
+        if entrada.lower() == "n":
+            if pagina * POR_PAGINA < total:
+                pagina += 1
+            else:
+                print("  já é a última página")
             continue
 
-        v = vozes[int(escolha) - 1]
-        print(f"  {v.title}")
-        ouvir_fish(sessao, v.id)
-        print(f'\n  Para usar esta voz, no config.json:')
-        print(f'     "voz_fish": "{v.id}"\n')
+        if entrada.lower() == "p":
+            pagina = max(1, pagina - 1)
+            continue
+
+        if entrada.lower().startswith("b "):
+            busca, pagina, so_minhas = entrada[2:].strip(), 1, False
+            continue
+
+        if entrada.lower().startswith("s "):
+            resto = entrada[2:].strip()
+            if resto.isdigit() and 1 <= int(resto) <= len(vozes):
+                v = vozes[int(resto) - 1]
+                salvar_voz("voz_fish", v.id, v.title or "?")
+                em_uso = v.id
+            else:
+                print("  número inválido")
+            continue
+
+        if entrada.isdigit() and 1 <= int(entrada) <= len(vozes):
+            v = vozes[int(entrada) - 1]
+            print(f"  {v.title}")
+            ouvir_fish(sessao, v.id)
+            print(f'  id: {v.id}    (digite "s {entrada}" para usar esta)')
+        else:
+            print("  não entendi")
 
 
 # ----------------------------------------------------------------- Edge TTS
@@ -137,27 +215,36 @@ def modo_edge() -> None:
         return b"".join(partes)
 
     vozes = asyncio.run(listar())
-    em_uso = config_atual().get("voz_edge", "pt-BR-AntonioNeural")
+    em_uso = ler_config().get("voz_edge", "pt-BR-AntonioNeural")
 
-    print(f"\n{len(vozes)} voz(es) gratuita(s) em português:\n")
+    print("\n  Vozes gratuitas do Edge TTS — usadas só se a Fish Audio falhar\n")
     for i, v in enumerate(vozes, 1):
         marca = "  <<< EM USO" if v["ShortName"] == em_uso else ""
         genero = "masculina" if v["Gender"] == "Male" else "feminina"
-        print(f"  [{i:>2}] {v['ShortName']:<34} {genero:<10} {v['Locale']}{marca}")
+        print(f"  [{i:>2}] {v['ShortName']:<34} {genero:<10} "
+              f"{v['Locale']}{marca}")
 
-    print("\nDigite o número para OUVIR, ou Enter para sair.")
     while True:
+        print("\n  número = ouvir | s <n> = salvar | q = sair")
         try:
-            escolha = input("→ ").strip()
+            entrada = input("  → ").strip()
         except (EOFError, KeyboardInterrupt):
             return
-        if not escolha:
+        if not entrada or entrada.lower() == "q":
             return
-        if not escolha.isdigit() or not (1 <= int(escolha) <= len(vozes)):
+
+        salvar = entrada.lower().startswith("s ")
+        numero = entrada[2:].strip() if salvar else entrada
+        if not numero.isdigit() or not (1 <= int(numero) <= len(vozes)):
             print("  número inválido")
             continue
 
-        v = vozes[int(escolha) - 1]
+        v = vozes[int(numero) - 1]
+        if salvar:
+            salvar_voz("voz_edge", v["ShortName"], v["ShortName"])
+            em_uso = v["ShortName"]
+            continue
+
         print(f"  {v['ShortName']} — gerando...", end="", flush=True)
         try:
             mp3 = asyncio.run(gerar(v["ShortName"]))
@@ -165,23 +252,22 @@ def modo_edge() -> None:
                                    output_format=miniaudio.SampleFormat.SIGNED16,
                                    nchannels=1, sample_rate=24000)
             print(" tocando")
-            tocar_pcm(np.array(dec.samples, dtype=np.int16), 24000)
+            tocar(np.array(dec.samples, dtype=np.int16), 24000)
         except Exception as e:
             print(f" falhou: {e}")
-        print(f'\n  Para usar esta voz, no config.json:')
-        print(f'     "voz_edge": "{v["ShortName"]}"\n')
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:]]
+    args = sys.argv[1:]
 
     if "--edge" in args:
         modo_edge()
         return
 
-    so_minhas = "--minhas" in args
-    termo = next((a for a in args if not a.startswith("--")), None)
-    modo_fish(termo, so_minhas)
+    modo_fish(
+        sort_by="created_at" if "--novas" in args else "task_count",
+        so_minhas="--minhas" in args,
+    )
 
 
 if __name__ == "__main__":

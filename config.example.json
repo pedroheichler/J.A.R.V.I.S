@@ -50,6 +50,9 @@
   "sensibilidade_voz": 2.2,
   "volume_minimo_voz": 180,
 
+  "reconhecimento": "whisper",
+  "modelo_whisper": "small",
+
 
   "palavras_ativacao": [
     "ryuzaki",

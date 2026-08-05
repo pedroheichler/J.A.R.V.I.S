@@ -4,7 +4,13 @@ anthropic
 # Configuração — lê o arquivo .env
 python-dotenv
 
-# Reconhecimento de voz (usa a Google Speech API por baixo)
+# Reconhecimento de voz
+# faster-whisper roda o Whisper na própria máquina e aceita uma dica de
+# vocabulário — é o que faz ele acertar nomes próprios como "Kronos" e
+# "Nexpeed", que o Google erra sempre. Baixa o modelo (~470 MB) no primeiro uso.
+faster-whisper
+
+# SpeechRecognition é a reserva, caso o Whisper não carregue
 SpeechRecognition
 
 # Áudio — captura do microfone e reprodução da fala
