@@ -106,6 +106,12 @@ supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY) if SUPABASE_
 # threading.Event é thread-safe, ao contrário de uma variável bool simples
 jarvis_falando = threading.Event()
 
+# Última frase que o Jarvis falou. O microfone e o alto-falante estão na mesma
+# sala, então ele escuta a própria voz. Sem isso, uma resposta que contenha
+# "Jarvis" reativa a palavra de ativação e o assistente entra em loop
+# conversando sozinho. Ver parece_eco().
+ultima_fala = ""
+
 # -----------------------------------------------------------------------------
 # MEMÓRIA DE CONVERSA
 # -----------------------------------------------------------------------------
@@ -384,6 +390,9 @@ def falar(texto: str) -> None:
     Todos os três tocam pelo sounddevice, sem depender de nenhum programa
     externo — é o que permite rodar no Raspberry Pi sem alteração.
     """
+    global ultima_fala
+    ultima_fala = texto  # guardado para o filtro de eco (ver parece_eco)
+
     jarvis_falando.set()  # ativa — detecção de palma ignora enquanto True
     print(f"[Jarvis] {texto}")
 
@@ -955,6 +964,72 @@ def eh_comando_saida(texto: str) -> bool:
 # chamado pelo nome — como a Alexa.
 # A lista de palavras vem do config.json (ver PALAVRAS_ATIVACAO lá em cima).
 
+def separar_palavras(texto: str) -> set[str]:
+    """
+    Quebra o texto em palavras, sem pontuação e em minúsculas.
+
+    A pontuação precisa sair porque o Jarvis fala "senhor." e o
+    reconhecimento devolve "senhor" — comparar direto nunca casaria.
+    """
+    limpo = "".join(
+        c if (c.isalnum() or c.isspace()) else " " for c in texto.lower()
+    )
+    return set(limpo.split())
+
+
+def parece_eco(ouvido: str) -> bool:
+    """
+    Diz se o que o microfone captou é a própria voz do Jarvis voltando.
+
+    O alto-falante e o microfone estão na mesma sala, então tudo que o Jarvis
+    fala ele também escuta. Isso vira um loop: ele responde algo que contém
+    "Jarvis", o microfone capta, a palavra de ativação dispara de novo, ele
+    responde outra vez — e assim para sempre.
+
+    A comparação é por palavras, não por texto exato, porque o reconhecimento
+    quase nunca devolve a frase idêntica ao que foi falado. Se a maioria das
+    palavras ouvidas estava na última resposta, é eco.
+
+    (Um microfone com cancelamento de eco por hardware resolveria isso na
+    origem. Isto aqui é o remendo em software.)
+    """
+    if not ultima_fala:
+        return False
+
+    palavras_ouvidas = separar_palavras(ouvido)
+
+    # Uma palavra só é pouco pra decidir, e bloquearia um "Jarvis" legítimo
+    # dito logo depois de uma resposta que continha o nome dele.
+    if len(palavras_ouvidas) < 2:
+        return False
+
+    palavras_ditas = separar_palavras(ultima_fala)
+    proporcao = len(palavras_ouvidas & palavras_ditas) / len(palavras_ouvidas)
+
+    return proporcao >= 0.6
+
+
+def ouvir_teclado(fila: queue.Queue) -> None:
+    """
+    Thread que lê o teclado e entrega os comandos pela fila.
+
+    Roda em paralelo com o microfone. Antes o teclado era lido no meio do
+    loop principal, com input() bloqueante — o que travava a escuta enquanto
+    esperava alguém digitar. Numa thread, os dois funcionam juntos: dá pra
+    falar ou digitar, o que vier primeiro.
+    """
+    while True:
+        try:
+            texto = input()
+        except (EOFError, KeyboardInterrupt):
+            fila.put(None)  # None = pedido de encerramento
+            return
+
+        texto = texto.strip()
+        if texto:
+            fila.put(texto)
+
+
 def extrair_comando_apos_ativacao(texto: str) -> str | None:
     """
     Separa a palavra de ativação do comando que vem depois dela.
@@ -1171,31 +1246,57 @@ def main():
     # ouve, com o teclado como alternativa — rode com JARVIS_SEM_WAKE_WORD=1.
     usar_wake_word = os.environ.get("JARVIS_SEM_WAKE_WORD") != "1"
 
-    # Vira False no primeiro erro de microfone e o Jarvis passa pro teclado.
+    # Vira False no primeiro erro de microfone. O teclado continua valendo.
     microfone_ok = True
+
+    # Teclado numa thread própria: dá pra digitar mesmo enquanto o microfone
+    # está escutando. Antes o input() bloqueava o loop inteiro.
+    fila_teclado: queue.Queue = queue.Queue()
+    threading.Thread(target=ouvir_teclado, args=(fila_teclado,), daemon=True).start()
 
     if usar_wake_word:
         falar("Olá, senhor. Diga o meu nome quando precisar de mim.")
     else:
         falar("Olá, senhor. Como posso ajudá-lo?")
 
+    print("(ou digite o comando aqui e aperte Enter — Ctrl+C encerra)")
+
     while True:
         # ----- Captura de entrada -----
         comando = None
 
-        if microfone_ok:
+        # 1) Alguém digitou enquanto o Jarvis escutava?
+        # "" = fila vazia | None = Ctrl+C no teclado | texto = comando
+        try:
+            digitado = fila_teclado.get_nowait()
+        except queue.Empty:
+            digitado = ""
+
+        if digitado is None:
+            falar("Até mais!")
+            break
+
+        if digitado:
+            comando = digitado.lower()
+
+        # 2) Senão, escuta o microfone
+        if comando is None and microfone_ok:
             try:
                 ouvido = ouvir_microfone()
             except Exception as e:
                 # Microfone sumiu (desconectado, em uso por outro programa).
-                # Passa pro teclado e não tenta mais o microfone.
+                # O teclado continua funcionando pela thread.
                 print(f"[AVISO] Microfone indisponível: {e}")
+                print("[Jarvis] Escuta desativada — digite os comandos.")
                 microfone_ok = False
                 ouvido = None
 
-            if microfone_ok:
-                if not ouvido:
-                    continue  # ninguém falou — volta a escutar
+            if ouvido:
+                # Descarta a própria voz voltando pelo microfone. Sem isso o
+                # Jarvis responde, se escuta, e conversa sozinho pra sempre.
+                if parece_eco(ouvido):
+                    print("[Jarvis] (ignorando o próprio eco)")
+                    continue
 
                 if usar_wake_word:
                     comando = extrair_comando_apos_ativacao(ouvido)
@@ -1207,19 +1308,10 @@ def main():
                         # Chamou o nome sem mandar comando. Pergunta e escuta.
                         falar("Pois não, senhor?")
                         comando = ouvir_microfone()
-                        if not comando:
+                        if not comando or parece_eco(comando):
                             continue
                 else:
                     comando = ouvido
-
-        # Teclado — só quando o microfone não está disponível
-        if not comando and not microfone_ok:
-            try:
-                comando = input("\n[Digite seu comando] → ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                # Ctrl+C ou fim de stream — encerra graciosamente
-                falar("Até mais!")
-                break
 
         # Ignora entrada vazia
         if not comando:
