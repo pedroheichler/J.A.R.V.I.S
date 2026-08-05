@@ -13,10 +13,24 @@
     "As outras são grafias alternativas que o reconhecimento pode devolver.",
     "Escolha um nome que o reconhecimento acerte ('Jarvis' vira 'Chaves') e",
     "que você não use no dia a dia, senão ele dispara sozinho no meio de uma",
-    "conversa. O nome pode vir em qualquer lugar da frase."
+    "conversa. O nome pode vir em qualquer lugar da frase.",
+    "",
+    "limiar_ativacao: o quanto a palavra ouvida precisa se parecer com o nome",
+    "(0 a 1). O reconhecimento erra nomes próprios, então a comparação é por",
+    "semelhança. Suba se ele disparar à toa; desça se não estiver ouvindo.",
+    "",
+    "modelo/esforco: o botão entre inteligência, velocidade e custo.",
+    "esforco 'low' responde rápido (bom pra voz); 'medium' e 'high' pensam",
+    "mais, mas demoram mais e gastam mais."
   ],
 
+  "nome_usuario": "senhor",
   "cidade_clima": "Goiania",
+
+  "modelo": "claude-opus-5",
+  "esforco": "low",
+  "limiar_ativacao": 0.72,
+
 
   "palavras_ativacao": [
     "alfred",

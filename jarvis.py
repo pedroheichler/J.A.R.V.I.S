@@ -26,10 +26,12 @@ import json         # parse do JSON que o Claude retorna
 import webbrowser   # abre URLs no navegador padrão
 import subprocess   # abre programas do sistema (chrome, calc, etc.)
 import sys          # exit() para encerrar o programa
+import platform     # informa ao modelo em que sistema ele está rodando
 import threading    # roda detecção de palma em paralelo com o loop principal
 import time         # controla intervalo entre palmas
 import queue        # fila thread-safe para comunicar palma → ação
 from collections import deque  # buffer curto do áudio anterior à fala
+from difflib import SequenceMatcher  # compara nomes que o microfone errou
 
 import anthropic    # SDK oficial da Anthropic — acessa o Claude
 # beta_tool: transforma uma função Python normal em ferramenta que o Claude
@@ -225,8 +227,16 @@ CONFIG = carregar_config()
 APPS, NOMES_APPS = montar_mapa(CONFIG.get("aplicativos", {}))
 PASTAS, NOMES_PASTAS = montar_mapa(CONFIG.get("projetos", {}))
 
-# Cidade usada na consulta de clima do "bom dia"
+# Cidade usada na consulta de clima do "bom dia" e no contexto do modelo
 CIDADE_CLIMA = CONFIG.get("cidade_clima", "Goiania")
+
+# Como o assistente se refere ao dono da casa
+NOME_USUARIO = CONFIG.get("nome_usuario", "senhor")
+
+# Modelo e esforço de raciocínio — configuráveis porque são o botão de
+# ajuste entre inteligência, velocidade e custo. Ver processar_comando().
+MODELO = CONFIG.get("modelo", "claude-opus-5")
+ESFORCO = CONFIG.get("esforco", "low")
 
 # Palavras que acordam o Jarvis. O terminal imprime "[Você disse] ..." com o
 # que o reconhecimento entendeu, então dá pra acrescentar no config.json a
@@ -239,6 +249,12 @@ NOME_ATIVACAO = _ativacao[0] if _ativacao else "jarvis"
 # Da mais longa pra mais curta: "sexta-feira" precisa ser testada antes de
 # "sexta", senão o "-feira" sobraria grudado no comando.
 PALAVRAS_ATIVACAO = tuple(sorted(_ativacao, key=len, reverse=True))
+
+# Quanto uma palavra ouvida precisa se parecer com o nome para valer como
+# chamado (0 a 1). Ver achar_ativacao().
+#   mais alto  = mais rigoroso, pode não reconhecer o seu jeito de falar
+#   mais baixo = reconhece mais, mas dispara em palavras parecidas
+LIMIAR_ATIVACAO = float(CONFIG.get("limiar_ativacao", 0.72))
 
 
 # =============================================================================
@@ -296,6 +312,41 @@ Você recebe as mensagens anteriores desta sessão. Quando o senhor disser "ele"
 se refere. Se continuar ambíguo, pergunte.
 
 Responda sempre em português brasileiro.
+"""
+
+
+def montar_contexto() -> str:
+    """
+    Monta o bloco de contexto do momento, recalculado a cada comando.
+
+    Sem isso o modelo não sabe que dia é hoje, que horas são, nem com quem
+    está falando — e passa a inventar ou a chamar a ferramenta de clima só
+    pra descobrir a data.
+
+    Precisa ser função, e não parte do SYSTEM_PROMPT: o prompt é montado uma
+    vez quando o programa abre, e numa sessão longa a data ficaria congelada
+    na hora em que o assistente foi ligado.
+    """
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo"))
+
+    DIAS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+            "sexta-feira", "sábado", "domingo"]
+    MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
+             "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+
+    dia_semana = DIAS[agora.weekday()]
+    data = f"{agora.day} de {MESES[agora.month - 1]} de {agora.year}"
+
+    return f"""
+
+CONTEXTO DESTE MOMENTO (recalculado a cada pedido — confie nele):
+- Agora é {dia_semana}, {data}, {agora.strftime('%H:%M')}, horário de Brasília.
+- O senhor se chama {NOME_USUARIO} e está em {CIDADE_CLIMA}.
+- Você roda no computador dele, em {platform.system()}.
+- Seu nome é {NOME_ATIVACAO.capitalize()}.
+
+Use essas informações para responder direto sobre data, dia da semana e hora.
+Só chame a ferramenta de clima quando ele quiser a temperatura ou a previsão.
 """
 
 
@@ -804,9 +855,16 @@ def processar_comando(texto_usuario: str) -> None:
 
     try:
         runner = client.beta.messages.tool_runner(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=500,
-            system=SYSTEM_PROMPT,
+            model=MODELO,
+            # O teto cobre o raciocínio E a resposta juntos. Como o modelo
+            # pensa antes de responder, um teto apertado corta a fala no meio.
+            max_tokens=2000,
+            # effort regula quanto ele raciocina. "low" é o ponto certo aqui:
+            # as tarefas são curtas e o senhor está esperando de ouvido, então
+            # velocidade vale mais que profundidade. Suba pra "medium" ou
+            # "high" no config.json se quiser respostas mais elaboradas.
+            output_config={"effort": ESFORCO},
+            system=SYSTEM_PROMPT + montar_contexto(),
             tools=FERRAMENTAS,
             messages=mensagens,
             max_iterations=8,
@@ -970,9 +1028,67 @@ def eh_comando_saida(texto: str) -> bool:
 # =============================================================================
 # PALAVRA DE ATIVAÇÃO (wake word)
 # =============================================================================
-# Sem isso o Jarvis reage a tudo que ouve. Com isso ele só age quando é
+# Sem isso o assistente reage a tudo que ouve. Com isso ele só age quando é
 # chamado pelo nome — como a Alexa.
 # A lista de palavras vem do config.json (ver PALAVRAS_ATIVACAO lá em cima).
+
+def separar_em_palavras(texto: str) -> list[str]:
+    """Quebra a frase em palavras minúsculas, sem pontuação."""
+    limpas = (p.strip(" ,.!?;:\"'") for p in texto.lower().split())
+    return [p for p in limpas if p]
+
+
+def achar_ativacao(palavras: list[str]) -> tuple[int, int, float] | None:
+    """
+    Procura o nome do assistente na frase, tolerando erro de transcrição.
+
+    Compara por SEMELHANÇA, não por igualdade. O reconhecimento de voz erra
+    nomes próprios o tempo todo, e ficar catalogando grafia por grafia no
+    config.json é enxugar gelo: "alfred" pode voltar como "alfredo",
+    "alfrede", "aufredi", "au fred"...
+
+    SequenceMatcher dá uma nota de 0 a 1 pra quanto dois textos se parecem.
+    Acima de LIMIAR_ATIVACAO consideramos que é o nome.
+
+    Devolve (índice inicial, índice final, nota) do trecho que casou, ou None.
+    Suporta nome com mais de uma palavra ("sexta feira") comparando janelas
+    do tamanho certo.
+    """
+    melhor = None
+
+    for alvo in PALAVRAS_ATIVACAO:
+        tamanho = len(alvo.split())
+
+        for i in range(len(palavras) - tamanho + 1):
+            trecho = " ".join(palavras[i:i + tamanho])
+            nota = SequenceMatcher(None, trecho, alvo).ratio()
+
+            if nota >= LIMIAR_ATIVACAO and (melhor is None or nota > melhor[2]):
+                melhor = (i, i + tamanho, nota)
+
+    return melhor
+
+
+def melhor_semelhanca(texto: str) -> tuple[str, float]:
+    """
+    Qual palavra da frase mais se parece com o nome, e o quanto.
+
+    Usada só para diagnóstico: quando a ativação não casa, o terminal mostra
+    o que chegou perto. Assim dá pra ajustar o limiar ou acrescentar a
+    grafia certa no config.json sem ficar no escuro.
+    """
+    palavras = separar_em_palavras(texto)
+    campeao, nota_campeao = "", 0.0
+
+    for alvo in PALAVRAS_ATIVACAO:
+        tamanho = len(alvo.split())
+        for i in range(len(palavras) - tamanho + 1):
+            trecho = " ".join(palavras[i:i + tamanho])
+            nota = SequenceMatcher(None, trecho, alvo).ratio()
+            if nota > nota_campeao:
+                campeao, nota_campeao = trecho, nota
+
+    return campeao, nota_campeao
 
 def separar_palavras(texto: str) -> set[str]:
     """
@@ -1045,40 +1161,30 @@ def extrair_comando_apos_ativacao(texto: str) -> str | None:
     Separa a palavra de ativação do comando que vem depois dela.
 
     O nome pode estar em qualquer lugar da frase — na fala real ele aparece
-    tanto no começo ("Jarvis, bom dia") quanto no fim ("Bom dia, Jarvis").
+    tanto no começo ("Alfred, bom dia") quanto no fim ("Bom dia, Alfred").
     Por isso a função REMOVE o nome e devolve o que sobrou dos dois lados,
     em vez de pegar só o que vem depois.
 
     Três resultados possíveis:
-      "sexta-feira abre o chrome"  -> "abre o chrome"  (chamou e já mandou)
-      "bom dia sexta-feira"        -> "bom dia"        (nome no fim)
-      "sexta-feira"                -> ""               (só chamou)
-      "abre o chrome"              -> None             (não falou comigo)
+      "alfred abre o chrome"  -> "abre o chrome"  (chamou e já mandou)
+      "bom dia alfred"        -> "bom dia"        (nome no fim)
+      "alfred"                -> ""               (só chamou)
+      "abre o chrome"         -> None             (não falou comigo)
 
     A diferença entre "" e None importa: string vazia significa que o senhor
     chamou e o Jarvis deve perguntar o que quer; None significa que a frase
     não era dirigida a ele e deve ser descartada em silêncio.
     """
-    t = texto.lower().strip()
+    palavras = separar_em_palavras(texto)
+    if not palavras:
+        return None
 
-    # PALAVRAS_ATIVACAO vem ordenada da mais longa pra mais curta. Sem isso,
-    # "sexta" casaria antes de "sexta-feira" e sobraria um "-feira" solto
-    # dentro do comando.
-    for palavra in PALAVRAS_ATIVACAO:
-        posicao = t.find(palavra)
-        if posicao == -1:
-            continue
+    achado = achar_ativacao(palavras)
+    if achado is None:
+        return None
 
-        # Limpa a pontuação de cada lado ANTES de juntar. Sem isso, um nome
-        # no meio da frase deixa a vírgula órfã: "ei sexta-feira, abre o
-        # chrome" viraria "ei , abre o chrome".
-        antes = t[:posicao].strip(" ,.!?;:")
-        depois = t[posicao + len(palavra):].strip(" ,.!?;:")
-
-        # Junta os dois lados e normaliza os espaços que sobraram
-        return " ".join(f"{antes} {depois}".split())
-
-    return None
+    inicio, fim, _ = achado
+    return " ".join(palavras[:inicio] + palavras[fim:])
 
 
 # =============================================================================
@@ -1333,10 +1439,15 @@ def main():
                     comando = extrair_comando_apos_ativacao(ouvido)
 
                     if comando is None:
-                        # Falaram, mas não com o Jarvis. Sem esse aviso o
+                        # Falaram, mas não com o assistente. Sem esse aviso o
                         # silêncio parece defeito em vez de comportamento.
-                        print(f"[Jarvis] (me chame de "
-                              f"'{NOME_ATIVACAO}' primeiro)")
+                        # Mostra o que chegou mais perto do nome e a nota:
+                        # se estiver perto do limiar, é só ajustar no config.
+                        parecida, nota = melhor_semelhanca(ouvido)
+                        print(f"[{NOME_ATIVACAO.capitalize()}] "
+                              f"(me chame de '{NOME_ATIVACAO}' primeiro — "
+                              f"mais parecido: '{parecida}' {nota:.0%}, "
+                              f"preciso de {LIMIAR_ATIVACAO:.0%})")
                         continue
 
                     if not comando:
