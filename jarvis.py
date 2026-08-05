@@ -228,12 +228,17 @@ PASTAS, NOMES_PASTAS = montar_mapa(CONFIG.get("projetos", {}))
 # Cidade usada na consulta de clima do "bom dia"
 CIDADE_CLIMA = CONFIG.get("cidade_clima", "Goiania")
 
-# Palavra que acorda o Jarvis. "Jarvis" é nome inglês e o reconhecimento em
-# português às vezes escreve diferente — o terminal imprime "[Você disse] ..."
-# com o que foi entendido, então dá pra acrescentar a grafia que aparecer.
-PALAVRAS_ATIVACAO = tuple(
-    p.lower() for p in CONFIG.get("palavras_ativacao", ["jarvis"])
-)
+# Palavras que acordam o Jarvis. O terminal imprime "[Você disse] ..." com o
+# que o reconhecimento entendeu, então dá pra acrescentar no config.json a
+# grafia que aparecer na prática.
+_ativacao = [p.lower().strip() for p in CONFIG.get("palavras_ativacao", ["jarvis"]) if p.strip()]
+
+# Nome principal — o primeiro da lista. Usado só para exibir nas mensagens.
+NOME_ATIVACAO = _ativacao[0] if _ativacao else "jarvis"
+
+# Da mais longa pra mais curta: "sexta-feira" precisa ser testada antes de
+# "sexta", senão o "-feira" sobraria grudado no comando.
+PALAVRAS_ATIVACAO = tuple(sorted(_ativacao, key=len, reverse=True))
 
 
 # =============================================================================
@@ -1034,10 +1039,16 @@ def extrair_comando_apos_ativacao(texto: str) -> str | None:
     """
     Separa a palavra de ativação do comando que vem depois dela.
 
+    O nome pode estar em qualquer lugar da frase — na fala real ele aparece
+    tanto no começo ("Jarvis, bom dia") quanto no fim ("Bom dia, Jarvis").
+    Por isso a função REMOVE o nome e devolve o que sobrou dos dois lados,
+    em vez de pegar só o que vem depois.
+
     Três resultados possíveis:
-      "jarvis abre o chrome"  -> "abre o chrome"  (chamou e já mandou)
-      "jarvis"                -> ""               (só chamou, comando vem depois)
-      "abre o chrome"         -> None             (não falou comigo, ignora)
+      "sexta-feira abre o chrome"  -> "abre o chrome"  (chamou e já mandou)
+      "bom dia sexta-feira"        -> "bom dia"        (nome no fim)
+      "sexta-feira"                -> ""               (só chamou)
+      "abre o chrome"              -> None             (não falou comigo)
 
     A diferença entre "" e None importa: string vazia significa que o senhor
     chamou e o Jarvis deve perguntar o que quer; None significa que a frase
@@ -1045,12 +1056,22 @@ def extrair_comando_apos_ativacao(texto: str) -> str | None:
     """
     t = texto.lower().strip()
 
+    # PALAVRAS_ATIVACAO vem ordenada da mais longa pra mais curta. Sem isso,
+    # "sexta" casaria antes de "sexta-feira" e sobraria um "-feira" solto
+    # dentro do comando.
     for palavra in PALAVRAS_ATIVACAO:
         posicao = t.find(palavra)
-        if posicao != -1:
-            resto = t[posicao + len(palavra):]
-            # Tira a vírgula e o espaço de "Jarvis, abre o chrome"
-            return resto.strip(" ,.!?;:")
+        if posicao == -1:
+            continue
+
+        # Limpa a pontuação de cada lado ANTES de juntar. Sem isso, um nome
+        # no meio da frase deixa a vírgula órfã: "ei sexta-feira, abre o
+        # chrome" viraria "ei , abre o chrome".
+        antes = t[:posicao].strip(" ,.!?;:")
+        depois = t[posicao + len(palavra):].strip(" ,.!?;:")
+
+        # Junta os dois lados e normaliza os espaços que sobraram
+        return " ".join(f"{antes} {depois}".split())
 
     return None
 
@@ -1256,10 +1277,10 @@ def main():
 
     if usar_wake_word:
         falar("Olá, senhor. Diga o meu nome quando precisar de mim.")
-        nome = PALAVRAS_ATIVACAO[0]
-        print(f"\n  Por voz  : comece pelo nome — \"{nome}, que horas são?\"")
+        print(f"\n  Por voz  : diga o nome na frase — "
+              f"\"{NOME_ATIVACAO}, que horas são?\" ou \"bom dia, {NOME_ATIVACAO}\"")
         print(f"  Digitando: escreva o comando e aperte Enter "
-              f"(aqui o \"{nome}\" não é necessário)")
+              f"(aqui o \"{NOME_ATIVACAO}\" não é necessário)")
         print("  Encerrar : diga \"tchau\" ou aperte Ctrl+C\n")
     else:
         falar("Olá, senhor. Como posso ajudá-lo?")
@@ -1310,7 +1331,7 @@ def main():
                         # Falaram, mas não com o Jarvis. Sem esse aviso o
                         # silêncio parece defeito em vez de comportamento.
                         print(f"[Jarvis] (me chame de "
-                              f"'{PALAVRAS_ATIVACAO[0]}' primeiro)")
+                              f"'{NOME_ATIVACAO}' primeiro)")
                         continue
 
                     if not comando:

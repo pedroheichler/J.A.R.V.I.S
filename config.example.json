@@ -7,18 +7,20 @@
     "Os apelidos são outras formas de pedir a mesma coisa: funcionam na hora",
     "de abrir, mas não aparecem quando ele lista o que sabe fazer.",
     "",
-    "No Windows dá pra usar %USERNAME%, que é resolvido na hora de abrir."
+    "No Windows dá pra usar %USERNAME%, que é resolvido na hora de abrir.",
+    "",
+    "palavras_ativacao: a PRIMEIRA é o nome oficial, usado nas mensagens.",
+    "As outras são grafias alternativas que o reconhecimento pode devolver.",
+    "Prefira expressões em português — 'Jarvis' costuma virar 'Chaves'.",
+    "Evite palavras que você usa no dia a dia, ou ele dispara sozinho."
   ],
 
   "cidade_clima": "Goiania",
 
   "palavras_ativacao": [
-    "jarvis",
-    "járvis",
-    "jarvez",
-    "jarves",
-    "jávis",
-    "travis"
+    "sexta-feira",
+    "sexta feira",
+    "sextafeira"
   ],
 
   "aplicativos": {
