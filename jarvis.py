@@ -89,13 +89,9 @@ if not ANTHROPIC_API_KEY:
 # Cria o cliente da Anthropic uma vez só — reutilizado em todas as chamadas
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# Fish Audio
+# Fish Audio — as vozes ficam no config.json (ver logo abaixo de CONFIG)
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY")
 fish_client = fish.Session(FISH_AUDIO_API_KEY) if FISH_AUDIO_API_KEY else None
-FISH_VOICE_ID = "a5b93aeddcc948c19ea04f0afe9d178c"
-
-# Voz do Edge TTS — fallback gratuito
-EDGE_VOICE = "pt-BR-AntonioNeural"
 
 # Supabase — integração com Kronos
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -237,6 +233,18 @@ NOME_USUARIO = CONFIG.get("nome_usuario", "senhor")
 # ajuste entre inteligência, velocidade e custo. Ver processar_comando().
 MODELO = CONFIG.get("modelo", "claude-opus-5")
 ESFORCO = CONFIG.get("esforco", "low")
+
+# --- VOZES -------------------------------------------------------------
+# Voz principal: Fish Audio. O ID vem de fish.audio — abra a voz que quiser
+# na biblioteca (ou uma que o senhor mesmo clonou) e copie o identificador
+# da URL. Use `python vozes.py` para ouvir as suas antes de escolher.
+FISH_VOICE_ID = CONFIG.get("voz_fish", "a5b93aeddcc948c19ea04f0afe9d178c")
+
+# Voz reserva: Edge TTS, gratuita, usada se a Fish Audio falhar.
+# Opções em português: pt-BR-AntonioNeural (masculina),
+# pt-BR-FranciscaNeural e pt-BR-ThalitaMultilingualNeural (femininas),
+# pt-PT-DuarteNeural e pt-PT-RaquelNeural (sotaque de Portugal).
+EDGE_VOICE = CONFIG.get("voz_edge", "pt-BR-AntonioNeural")
 
 # Palavras que acordam o Jarvis. O terminal imprime "[Você disse] ..." com o
 # que o reconhecimento entendeu, então dá pra acrescentar no config.json a
