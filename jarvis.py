@@ -29,6 +29,7 @@ import sys          # exit() para encerrar o programa
 import threading    # roda detecção de palma em paralelo com o loop principal
 import time         # controla intervalo entre palmas
 import queue        # fila thread-safe para comunicar palma → ação
+from collections import deque  # buffer curto do áudio anterior à fala
 
 import anthropic    # SDK oficial da Anthropic — acessa o Claude
 # beta_tool: transforma uma função Python normal em ferramenta que o Claude
@@ -297,37 +298,176 @@ def falar(texto: str) -> None:
     jarvis_falando.clear()
 
 
+def volume_rms(bloco) -> float:
+    """
+    Mede o volume de um pedaço de áudio (RMS = raiz da média dos quadrados).
+
+    RMS é a medida de energia do som. Um número só, que serve tanto pra
+    detectar fala quanto pra detectar palma.
+    """
+    return float(np.sqrt(np.mean(bloco.astype(np.float32) ** 2)))
+
+
+class DetectorDeFala:
+    """
+    Decide quando o senhor COMEÇOU e quando PAROU de falar.
+
+    Substitui a gravação de duração fixa. Antes eram sempre 5 segundos: você
+    esperava 5 s mesmo dizendo só "oi", e era cortado no meio de uma frase
+    longa. Agora a gravação dura o tempo que a fala durar.
+
+    A lógica é uma máquina de estados alimentada pelo volume de cada pedaço:
+
+        ESPERANDO ──fala detectada──> GRAVANDO ──silêncio longo──> FIM
+            │                             │
+            └──ninguém falou──> TIMEOUT   └──passou do teto──> FIM
+
+    Fica separada da captura de áudio de propósito: assim dá pra testar a
+    lógica com sequências de volume, sem precisar de microfone.
+    """
+
+    ESPERANDO = "esperando"
+    GRAVANDO = "gravando"
+    FIM = "fim"
+    TIMEOUT = "timeout"
+
+    def __init__(self, limiar: float, chunk_s: float,
+                 silencio_final: float = 0.9, espera_max: float = 6.0,
+                 fala_max: float = 20.0, min_fala: float = 0.25):
+        self.limiar = limiar
+
+        # Silêncio que encerra a fala. Curto demais corta você no meio de uma
+        # pausa pra pensar; longo demais deixa a resposta lenta.
+        self.CHUNKS_SILENCIO_FINAL = max(1, int(silencio_final / chunk_s))
+        # Se ninguém falar nesse tempo, desiste e devolve TIMEOUT.
+        self.CHUNKS_ESPERA_MAX = max(1, int(espera_max / chunk_s))
+        # Teto de segurança: nunca grava mais que isso.
+        self.CHUNKS_FALA_MAX = max(1, int(fala_max / chunk_s))
+        # Fala curta demais é ruído (tosse, porta batendo), não comando.
+        self.CHUNKS_MIN_FALA = max(1, int(min_fala / chunk_s))
+
+        self.estado = self.ESPERANDO
+        self.chunks_totais = 0
+        self.chunks_gravando = 0
+        self.chunks_silencio = 0
+        self.chunks_com_voz = 0
+
+    def processa(self, volume: float) -> str:
+        """Consome um pedaço de áudio e devolve o estado atual."""
+        self.chunks_totais += 1
+        tem_voz = volume > self.limiar
+
+        if self.estado == self.ESPERANDO:
+            if tem_voz:
+                self.estado = self.GRAVANDO
+                self.chunks_gravando = 1
+                self.chunks_com_voz = 1
+                self.chunks_silencio = 0
+            elif self.chunks_totais >= self.CHUNKS_ESPERA_MAX:
+                self.estado = self.TIMEOUT
+
+        elif self.estado == self.GRAVANDO:
+            self.chunks_gravando += 1
+
+            if tem_voz:
+                self.chunks_com_voz += 1
+                self.chunks_silencio = 0
+            else:
+                self.chunks_silencio += 1
+                if self.chunks_silencio >= self.CHUNKS_SILENCIO_FINAL:
+                    if self.chunks_com_voz >= self.CHUNKS_MIN_FALA:
+                        self.estado = self.FIM
+                    else:
+                        # Foi um estalo, não uma frase. Volta a esperar.
+                        self.estado = self.ESPERANDO
+                        self.chunks_silencio = 0
+
+            if self.chunks_gravando >= self.CHUNKS_FALA_MAX:
+                self.estado = self.FIM
+
+        return self.estado
+
+
 def ouvir_microfone() -> str | None:
     """
     Captura áudio do microfone e converte em texto usando Google Speech API.
 
-    Usa sounddevice para gravar e SpeechRecognition para reconhecer.
-    sounddevice grava por um tempo fixo (5s) — não detecta silêncio automaticamente,
-    mas é compatível com Python 3.14 onde pyaudio não tem wheel disponível.
+    Grava pelo tempo que a fala durar, em vez de uma janela fixa. O limiar é
+    calibrado a cada chamada medindo o ruído de fundo por 300 ms — assim ele
+    se adapta ao seu microfone e ao barulho da sala, sem número mágico.
     """
-    SAMPLE_RATE = 16000  # Hz — qualidade suficiente para voz
-    DURACAO = 5          # segundos de gravação
+    SAMPLE_RATE = 16000       # Hz — qualidade suficiente para voz
+    CHUNK = 0.03              # 30 ms por pedaço
+    BLOCO = int(SAMPLE_RATE * CHUNK)
 
-    print("\n[Jarvis] Ouvindo... (você tem 5 segundos para falar)")
+    CHUNKS_CALIBRACAO = 10    # 300 ms medindo o silêncio da sala
+    FATOR_RUIDO = 3.5         # fala precisa ser 3,5x o ruído de fundo
+    LIMIAR_MINIMO = 250       # piso, pra sala silenciosa não ficar sensível demais
+    PRE_ROLL = 5              # 150 ms guardados antes da fala começar
 
-    jarvis_falando.set()  # pausa detecção de palma enquanto usuário fala
+    DEBUG = os.environ.get("JARVIS_DEBUG_FALA") == "1"
+
+    jarvis_falando.set()  # pausa detecção de palma enquanto o senhor fala
     try:
-        audio_data = sd.rec(
-            int(DURACAO * SAMPLE_RATE),
+        with sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
-            dtype="int16"
-        )
-        sd.wait()
+            dtype="int16",
+            blocksize=BLOCO,
+        ) as stream:
+            # ----- Calibração: quanto é "silêncio" nesta sala, agora? -----
+            ruidos = []
+            for _ in range(CHUNKS_CALIBRACAO):
+                bloco, _ = stream.read(BLOCO)
+                ruidos.append(volume_rms(bloco))
+            # mediana em vez de média: um estalo isolado não estraga a medida
+            ruido = float(np.median(ruidos))
+            limiar = max(LIMIAR_MINIMO, ruido * FATOR_RUIDO)
+
+            if DEBUG:
+                print(f"[fala:debug] ruído de fundo={ruido:.0f} limiar={limiar:.0f}")
+
+            detector = DetectorDeFala(limiar, CHUNK)
+            print("\n[Jarvis] Ouvindo...")
+
+            # PRE_ROLL guarda os últimos pedaços de "silêncio". Quando a fala
+            # começa, eles entram na gravação — senão o primeiro som da
+            # palavra é cortado e o reconhecimento erra.
+            pre_roll = deque(maxlen=PRE_ROLL)
+            pedacos = []
+            comecou = False
+
+            while True:
+                bloco, _ = stream.read(BLOCO)
+                estado = detector.processa(volume_rms(bloco))
+
+                if estado == DetectorDeFala.ESPERANDO:
+                    pre_roll.append(bloco.copy())
+                elif estado in (DetectorDeFala.GRAVANDO, DetectorDeFala.FIM):
+                    if not comecou:
+                        pedacos.extend(pre_roll)
+                        comecou = True
+                    pedacos.append(bloco.copy())
+
+                if estado == DetectorDeFala.FIM:
+                    break
+                if estado == DetectorDeFala.TIMEOUT:
+                    return None
+
     except KeyboardInterrupt:
-        sd.stop()
-        jarvis_falando.clear()
         raise
     except Exception as e:
         print(f"[ERRO] Falha ao gravar áudio: {e}")
-        jarvis_falando.clear()
         return None
-    jarvis_falando.clear()  # reativa detecção após gravar
+    finally:
+        jarvis_falando.clear()  # reativa detecção de palma
+
+    if not pedacos:
+        return None
+
+    audio_data = np.concatenate(pedacos)
+    if DEBUG:
+        print(f"[fala:debug] gravado {len(audio_data) / SAMPLE_RATE:.1f}s")
 
     # Salva o áudio gravado num arquivo WAV temporário em memória
     # SpeechRecognition precisa de um arquivo WAV para processar
@@ -822,7 +962,7 @@ def detectar_palma():
         if jarvis_falando.is_set():
             return
 
-        volume = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+        volume = volume_rms(indata)
 
         if DEBUG and volume > LIMIAR * 0.4:
             print(f"[palma:debug] volume={volume:7.0f} limiar={LIMIAR}")
