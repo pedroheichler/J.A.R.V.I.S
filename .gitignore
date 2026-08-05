@@ -1,6 +1,10 @@
 # Credenciais — NUNCA subir para o GitHub
 .env
 
+# Configuração pessoal — contém os seus caminhos de pasta.
+# O que vai pro repositório é o config.example.json.
+config.json
+
 # Python
 __pycache__/
 *.py[cod]

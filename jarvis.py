@@ -140,41 +140,94 @@ recognizer.dynamic_energy_threshold = True
 
 
 # =============================================================================
-# MAPA DE APLICATIVOS (Windows)
+# CONFIGURAÇÃO (config.json)
 # =============================================================================
-# Dicionário que mapeia nomes comuns para o comando de abertura no Windows.
-# subprocess.Popen() executa esses comandos como se fossem no terminal.
+# Aplicativos, projetos e preferências ficam num arquivo à parte, e não no
+# código. Três motivos:
 #
-# "calc": calculadora do Windows (built-in, não precisa de caminho completo)
-# "chrome": precisa do caminho completo porque não está no PATH por padrão
-#
-# PERSONALIZE: adicione seus próprios apps aqui!
-APPS = {
-    "chrome":      r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    "google chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    "calculadora": "calc",
-    "calc":        "calc",
-    "bloco de notas": "notepad",
-    "notepad":     "notepad",
-    "explorador":  "explorer",
-    "explorador de arquivos": "explorer",
-    "file explorer": "explorer",
-    "word":        r"C:\Program Files\Microsoft Office\root\Office16\WINWORD.EXE",
-    "excel":       r"C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE",
-    "vscode":      r"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    "vs code":     r"C:\Users\%USERNAME%\AppData\Local\Programs\Microsoft VS Code\Code.exe",
-    "spotify":     r"C:\Users\%USERNAME%\AppData\Roaming\Spotify\Spotify.exe",
-    "whatsapp":    r"C:\Users\%USERNAME%\AppData\Local\WhatsApp\WhatsApp.exe",
-}
+#   1. Cadastrar um app novo não exige mexer em Python
+#   2. Seus caminhos de pasta não vão parar no GitHub (config.json está no
+#      .gitignore; o que o repositório carrega é o config.example.json)
+#   3. Cada app tem UM nome de verdade e uma lista de apelidos. Antes o
+#      apelido era outra entrada do dicionário, e o Jarvis lia a lista em voz
+#      alta com tudo duplicado: "calc, calculadora, explorador, explorador de
+#      arquivos..."
 
-# Pastas de projetos — abre direto no VSCode
-# Adicione seus projetos aqui: "nome que você vai falar": "caminho da pasta"
-PASTAS = {
-    "kronos":    r"C:\Programação\Trabalho-Pessoal\app Kronos",
-    "app kronos": r"C:\Programação\Trabalho-Pessoal\app Kronos",
-    "nexpeed":   r"C:\Programação\Nexpeed\Nexpeed",
-    "jarvis":    r"C:\Programação\Trabalho-Pessoal\Jarvis",
-}
+def carregar_config() -> dict:
+    """
+    Lê o config.json. Se não existir, cai no config.example.json.
+
+    O programa continua funcionando sem configuração nenhuma — só fica sem
+    abrir apps e pastas. Um JSON quebrado avisa e segue, em vez de derrubar
+    o Jarvis na inicialização.
+    """
+    pasta = os.path.dirname(os.path.abspath(__file__))
+    real = os.path.join(pasta, "config.json")
+    exemplo = os.path.join(pasta, "config.example.json")
+
+    caminho = real
+    if not os.path.exists(real):
+        if not os.path.exists(exemplo):
+            print("[AVISO] Sem config.json — abrir apps e pastas ficará desativado.")
+            return {}
+        print("[AVISO] config.json não encontrado, usando config.example.json.")
+        print("        Copie para config.json e ajuste com os seus caminhos.")
+        caminho = exemplo
+
+    try:
+        with open(caminho, encoding="utf-8") as arquivo:
+            return json.load(arquivo)
+    except json.JSONDecodeError as e:
+        print(f"[ERRO] {os.path.basename(caminho)} tem JSON inválido: {e}")
+        print("       Abrir apps e pastas ficará desativado.")
+        return {}
+
+
+def montar_mapa(itens: dict) -> tuple[dict, list[str]]:
+    """
+    Transforma a seção do config em duas coisas:
+
+      mapa  — todo nome e apelido apontando pro caminho (para a busca)
+      nomes — só os nomes de verdade, ordenados (para o Claude ler)
+
+    Aceita as duas formas no JSON:
+        "calculadora": "calc"
+        "calculadora": {"caminho": "calc", "apelidos": ["calc"]}
+    """
+    mapa: dict[str, str] = {}
+    nomes: list[str] = []
+
+    for nome, dados in itens.items():
+        caminho = dados.get("caminho", "") if isinstance(dados, dict) else dados
+        if not caminho:
+            continue
+
+        mapa[nome.lower()] = caminho
+        nomes.append(nome)
+
+        if isinstance(dados, dict):
+            for apelido in dados.get("apelidos", []):
+                mapa[apelido.lower()] = caminho
+
+    return mapa, sorted(nomes)
+
+
+CONFIG = carregar_config()
+
+# APPS/PASTAS incluem os apelidos — é por onde a busca acontece.
+# NOMES_* têm só os nomes de verdade — é o que o Claude recebe e fala.
+APPS, NOMES_APPS = montar_mapa(CONFIG.get("aplicativos", {}))
+PASTAS, NOMES_PASTAS = montar_mapa(CONFIG.get("projetos", {}))
+
+# Cidade usada na consulta de clima do "bom dia"
+CIDADE_CLIMA = CONFIG.get("cidade_clima", "Goiania")
+
+# Palavra que acorda o Jarvis. "Jarvis" é nome inglês e o reconhecimento em
+# português às vezes escreve diferente — o terminal imprime "[Você disse] ..."
+# com o que foi entendido, então dá pra acrescentar a grafia que aparecer.
+PALAVRAS_ATIVACAO = tuple(
+    p.lower() for p in CONFIG.get("palavras_ativacao", ["jarvis"])
+)
 
 
 # =============================================================================
@@ -213,10 +266,10 @@ que foi feito. Sua resposta é falada em voz alta, então escreva como se fosse
 falar: sem listas, sem markdown, sem emojis, sem URLs soletradas.
 
 APLICATIVOS DISPONÍVEIS:
-{", ".join(sorted(APPS))}
+{", ".join(NOMES_APPS)}
 
 PROJETOS DISPONÍVEIS:
-{", ".join(sorted(PASTAS))}
+{", ".join(NOMES_PASTAS)}
 
 Se o senhor pedir algo fora dessas listas, diga que não está cadastrado em vez
 de adivinhar um nome parecido.
@@ -838,9 +891,9 @@ def bom_dia_jarvis() -> str:
     else:
         saudacao = "Boa noite"
 
-    # Clima de Goiânia via wttr.in
+    # Clima via wttr.in — cidade configurável no config.json
     try:
-        url = "https://wttr.in/Goiania?format=j1"
+        url = f"https://wttr.in/{quote_plus(CIDADE_CLIMA)}?format=j1"
         with urllib.request.urlopen(url, timeout=5) as r:
             dados = json.loads(r.read())
 
@@ -864,7 +917,7 @@ def bom_dia_jarvis() -> str:
         vai_chover = float(chuva_mm) > 0.5
         previsao = "Há previsão de chuva, senhor." if vai_chover else "Sem previsão de chuva."
 
-        clima = f"{temp} graus em Goiânia, {tempo}. {previsao}"
+        clima = f"{temp} graus em {CIDADE_CLIMA}, {tempo}. {previsao}"
     except Exception:
         clima = "Não consegui obter o clima no momento, senhor."
 
@@ -900,15 +953,7 @@ def eh_comando_saida(texto: str) -> bool:
 # =============================================================================
 # Sem isso o Jarvis reage a tudo que ouve. Com isso ele só age quando é
 # chamado pelo nome — como a Alexa.
-#
-# "Jarvis" é um nome inglês, e o reconhecimento em português às vezes escreve
-# diferente. Se o seu sotaque ou microfone produzir outra grafia, acrescente
-# aqui: o terminal sempre imprime "[Você disse] ..." com o que foi entendido,
-# então dá pra ver exatamente o que precisa entrar na lista.
-PALAVRAS_ATIVACAO = (
-    "jarvis", "járvis", "jarvez", "jarves", "jarvis'", "jávis", "travis",
-)
-
+# A lista de palavras vem do config.json (ver PALAVRAS_ATIVACAO lá em cima).
 
 def extrair_comando_apos_ativacao(texto: str) -> str | None:
     """

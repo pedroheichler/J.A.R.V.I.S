@@ -1,0 +1,69 @@
+{
+  "_comentario": [
+    "Copie este arquivo para config.json e ajuste com os seus caminhos.",
+    "O config.json fica fora do Git — os caminhos aqui são só de exemplo.",
+    "",
+    "Em aplicativos e projetos, a CHAVE é o nome que o Jarvis conhece e fala.",
+    "Os apelidos são outras formas de pedir a mesma coisa: funcionam na hora",
+    "de abrir, mas não aparecem quando ele lista o que sabe fazer.",
+    "",
+    "No Windows dá pra usar %USERNAME%, que é resolvido na hora de abrir."
+  ],
+
+  "cidade_clima": "Goiania",
+
+  "palavras_ativacao": [
+    "jarvis",
+    "járvis",
+    "jarvez",
+    "jarves",
+    "jávis",
+    "travis"
+  ],
+
+  "aplicativos": {
+    "chrome": {
+      "caminho": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "apelidos": ["google chrome", "navegador"]
+    },
+    "calculadora": {
+      "caminho": "calc",
+      "apelidos": ["calc"]
+    },
+    "bloco de notas": {
+      "caminho": "notepad",
+      "apelidos": ["notepad"]
+    },
+    "explorador de arquivos": {
+      "caminho": "explorer",
+      "apelidos": ["explorador", "file explorer", "meus arquivos"]
+    },
+    "word": {
+      "caminho": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+      "apelidos": []
+    },
+    "excel": {
+      "caminho": "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+      "apelidos": []
+    },
+    "vs code": {
+      "caminho": "C:\\Users\\%USERNAME%\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "apelidos": ["vscode", "código", "editor"]
+    },
+    "spotify": {
+      "caminho": "C:\\Users\\%USERNAME%\\AppData\\Roaming\\Spotify\\Spotify.exe",
+      "apelidos": ["música"]
+    },
+    "whatsapp": {
+      "caminho": "C:\\Users\\%USERNAME%\\AppData\\Local\\WhatsApp\\WhatsApp.exe",
+      "apelidos": ["zap", "zap zap"]
+    }
+  },
+
+  "projetos": {
+    "exemplo": {
+      "caminho": "C:\\caminho\\para\\seu\\projeto",
+      "apelidos": ["projeto exemplo"]
+    }
+  }
+}
