@@ -282,8 +282,13 @@ APLICATIVOS DISPONÍVEIS:
 PROJETOS DISPONÍVEIS:
 {", ".join(NOMES_PASTAS)}
 
-Se o senhor pedir algo fora dessas listas, diga que não está cadastrado em vez
-de adivinhar um nome parecido.
+Os comandos chegam por reconhecimento de voz, que erra nomes próprios o tempo
+todo: "Kronos" vira "Chronos", "Jarvis" vira "Chaves", "Nexpeed" vira "next
+speed". Quando o que o senhor pediu SOA como um item das listas acima, use o
+item da lista — foi o microfone que errou, não ele.
+
+Se não corresponder a nada das listas, aí sim diga que não está cadastrado.
+Nunca invente um programa ou pasta que não esteja listado.
 
 CONTEXTO DA CONVERSA:
 Você recebe as mensagens anteriores desta sessão. Quando o senhor disser "ele",

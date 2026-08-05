@@ -11,16 +11,18 @@
     "",
     "palavras_ativacao: a PRIMEIRA é o nome oficial, usado nas mensagens.",
     "As outras são grafias alternativas que o reconhecimento pode devolver.",
-    "Prefira expressões em português — 'Jarvis' costuma virar 'Chaves'.",
-    "Evite palavras que você usa no dia a dia, ou ele dispara sozinho."
+    "Escolha um nome que o reconhecimento acerte ('Jarvis' vira 'Chaves') e",
+    "que você não use no dia a dia, senão ele dispara sozinho no meio de uma",
+    "conversa. O nome pode vir em qualquer lugar da frase."
   ],
 
   "cidade_clima": "Goiania",
 
   "palavras_ativacao": [
-    "sexta-feira",
-    "sexta feira",
-    "sextafeira"
+    "alfred",
+    "alfredo",
+    "alfrede",
+    "aufred"
   ],
 
   "aplicativos": {
