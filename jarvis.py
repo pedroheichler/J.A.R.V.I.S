@@ -834,6 +834,46 @@ def eh_comando_saida(texto: str) -> bool:
 
 
 # =============================================================================
+# PALAVRA DE ATIVAÇÃO (wake word)
+# =============================================================================
+# Sem isso o Jarvis reage a tudo que ouve. Com isso ele só age quando é
+# chamado pelo nome — como a Alexa.
+#
+# "Jarvis" é um nome inglês, e o reconhecimento em português às vezes escreve
+# diferente. Se o seu sotaque ou microfone produzir outra grafia, acrescente
+# aqui: o terminal sempre imprime "[Você disse] ..." com o que foi entendido,
+# então dá pra ver exatamente o que precisa entrar na lista.
+PALAVRAS_ATIVACAO = (
+    "jarvis", "járvis", "jarvez", "jarves", "jarvis'", "jávis", "travis",
+)
+
+
+def extrair_comando_apos_ativacao(texto: str) -> str | None:
+    """
+    Separa a palavra de ativação do comando que vem depois dela.
+
+    Três resultados possíveis:
+      "jarvis abre o chrome"  -> "abre o chrome"  (chamou e já mandou)
+      "jarvis"                -> ""               (só chamou, comando vem depois)
+      "abre o chrome"         -> None             (não falou comigo, ignora)
+
+    A diferença entre "" e None importa: string vazia significa que o senhor
+    chamou e o Jarvis deve perguntar o que quer; None significa que a frase
+    não era dirigida a ele e deve ser descartada em silêncio.
+    """
+    t = texto.lower().strip()
+
+    for palavra in PALAVRAS_ATIVACAO:
+        posicao = t.find(palavra)
+        if posicao != -1:
+            resto = t[posicao + len(palavra):]
+            # Tira a vírgula e o espaço de "Jarvis, abre o chrome"
+            return resto.strip(" ,.!?;:")
+
+    return None
+
+
+# =============================================================================
 # DETECÇÃO DE PALMA
 # =============================================================================
 
@@ -1012,29 +1052,61 @@ def main():
     1. Tenta capturar voz do microfone
     2. Se não ouvir nada, pede input pelo teclado
     3. Verifica se é comando de saída
-    4. Manda pro Claude → recebe JSON → executa
+    4. Manda pro Claude, que chama as ferramentas necessárias
     5. Volta pro passo 1
     """
     # Inicia detecção de palma em thread separada (daemon=True: encerra junto com o programa)
     thread_palma = threading.Thread(target=detectar_palma, daemon=True)
     thread_palma.start()
 
-    falar("Olá, senhor. Como posso ajudá-lo?")
+    # Com wake word, o Jarvis fica escutando mas só age quando é chamado
+    # pelo nome. Para voltar ao comportamento antigo — reagir a tudo que
+    # ouve, com o teclado como alternativa — rode com JARVIS_SEM_WAKE_WORD=1.
+    usar_wake_word = os.environ.get("JARVIS_SEM_WAKE_WORD") != "1"
+
+    # Vira False no primeiro erro de microfone e o Jarvis passa pro teclado.
+    microfone_ok = True
+
+    if usar_wake_word:
+        falar("Olá, senhor. Diga o meu nome quando precisar de mim.")
+    else:
+        falar("Olá, senhor. Como posso ajudá-lo?")
 
     while True:
         # ----- Captura de entrada -----
         comando = None
 
-        # Tenta primeiro pelo microfone
-        try:
-            comando = ouvir_microfone()
-        except Exception as e:
-            # Se o microfone falhar (ex: não tem microfone conectado),
-            # cai silenciosamente pro modo texto
-            print(f"[AVISO] Microfone indisponível: {e}")
+        if microfone_ok:
+            try:
+                ouvido = ouvir_microfone()
+            except Exception as e:
+                # Microfone sumiu (desconectado, em uso por outro programa).
+                # Passa pro teclado e não tenta mais o microfone.
+                print(f"[AVISO] Microfone indisponível: {e}")
+                microfone_ok = False
+                ouvido = None
 
-        # Se não ouviu nada pelo microfone, usa o teclado como fallback
-        if not comando:
+            if microfone_ok:
+                if not ouvido:
+                    continue  # ninguém falou — volta a escutar
+
+                if usar_wake_word:
+                    comando = extrair_comando_apos_ativacao(ouvido)
+
+                    if comando is None:
+                        continue  # falaram, mas não com o Jarvis
+
+                    if not comando:
+                        # Chamou o nome sem mandar comando. Pergunta e escuta.
+                        falar("Pois não, senhor?")
+                        comando = ouvir_microfone()
+                        if not comando:
+                            continue
+                else:
+                    comando = ouvido
+
+        # Teclado — só quando o microfone não está disponível
+        if not comando and not microfone_ok:
             try:
                 comando = input("\n[Digite seu comando] → ").strip().lower()
             except (EOFError, KeyboardInterrupt):
