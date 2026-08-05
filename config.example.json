@@ -1,0 +1,108 @@
+{
+  "_comentario": [
+    "Copie este arquivo para config.json e ajuste com os seus caminhos.",
+    "O config.json fica fora do Git — os caminhos aqui são só de exemplo.",
+    "",
+    "Em aplicativos e projetos, a CHAVE é o nome que o Jarvis conhece e fala.",
+    "Os apelidos são outras formas de pedir a mesma coisa: funcionam na hora",
+    "de abrir, mas não aparecem quando ele lista o que sabe fazer.",
+    "",
+    "No Windows dá pra usar %USERNAME%, que é resolvido na hora de abrir.",
+    "",
+    "exigir_nome: com true, só age quando chamado pelo nome (mais seguro).",
+    "Com false é só falar — mas aí qualquer conversa perto do microfone vira",
+    "comando, e o filtro de eco passa a ser a única proteção contra ele",
+    "responder à própria voz.",
+    "",
+    "palavras_ativacao: a PRIMEIRA é o nome oficial, usado nas mensagens.",
+    "As outras são grafias alternativas que o reconhecimento pode devolver.",
+    "Escolha um nome que o reconhecimento acerte ('Jarvis' vira 'Chaves') e",
+    "que você não use no dia a dia, senão ele dispara sozinho no meio de uma",
+    "conversa. O nome pode vir em qualquer lugar da frase.",
+    "",
+    "limiar_ativacao: o quanto a palavra ouvida precisa se parecer com o nome",
+    "(0 a 1). O reconhecimento erra nomes próprios, então a comparação é por",
+    "semelhança. Suba se ele disparar à toa; desça se não estiver ouvindo.",
+    "",
+    "modelo/esforco: o botão entre inteligência, velocidade e custo.",
+    "esforco 'low' responde rápido (bom pra voz); 'medium' e 'high' pensam",
+    "mais, mas demoram mais e gastam mais.",
+    "",
+    "voz_fish: identificador da voz na Fish Audio (a voz principal).",
+    "voz_edge: voz gratuita usada se a Fish Audio falhar.",
+    "Rode `python vozes.py` para ouvir as opções antes de escolher."
+  ],
+
+  "nome_usuario": "senhor",
+  "cidade_clima": "Goiania",
+
+  "modelo": "claude-sonnet-5",
+  "esforco": "medium",
+
+  "voz_fish": "a5b93aeddcc948c19ea04f0afe9d178c",
+  "voz_edge": "pt-BR-AntonioNeural",
+
+  "limiar_ativacao": 0.72,
+
+
+  "exigir_nome": true,
+
+  "sensibilidade_voz": 2.2,
+  "volume_minimo_voz": 180,
+
+  "reconhecimento": "whisper",
+  "modelo_whisper": "small",
+
+
+  "palavras_ativacao": [
+    "ryuzaki",
+    "riuzaki",
+    "riozaki"
+  ],
+
+  "aplicativos": {
+    "chrome": {
+      "caminho": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "apelidos": ["google chrome", "navegador"]
+    },
+    "calculadora": {
+      "caminho": "calc",
+      "apelidos": ["calc"]
+    },
+    "bloco de notas": {
+      "caminho": "notepad",
+      "apelidos": ["notepad"]
+    },
+    "explorador de arquivos": {
+      "caminho": "explorer",
+      "apelidos": ["explorador", "file explorer", "meus arquivos"]
+    },
+    "word": {
+      "caminho": "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+      "apelidos": []
+    },
+    "excel": {
+      "caminho": "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE",
+      "apelidos": []
+    },
+    "vs code": {
+      "caminho": "C:\\Users\\%USERNAME%\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe",
+      "apelidos": ["vscode", "código", "editor"]
+    },
+    "spotify": {
+      "caminho": "C:\\Users\\%USERNAME%\\AppData\\Roaming\\Spotify\\Spotify.exe",
+      "apelidos": ["música"]
+    },
+    "whatsapp": {
+      "caminho": "C:\\Users\\%USERNAME%\\AppData\\Local\\WhatsApp\\WhatsApp.exe",
+      "apelidos": ["zap", "zap zap"]
+    }
+  },
+
+  "projetos": {
+    "exemplo": {
+      "caminho": "C:\\caminho\\para\\seu\\projeto",
+      "apelidos": ["projeto exemplo"]
+    }
+  }
+}

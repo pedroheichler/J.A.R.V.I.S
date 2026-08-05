@@ -1,4 +1,38 @@
+# Cérebro — interpreta os comandos e chama as ferramentas
 anthropic
+
+# Configuração — lê o arquivo .env
+python-dotenv
+
+# Reconhecimento de voz
+# faster-whisper roda o Whisper na própria máquina e aceita uma dica de
+# vocabulário — é o que faz ele acertar nomes próprios como "Kronos" e
+# "Nexpeed", que o Google erra sempre. Baixa o modelo (~470 MB) no primeiro uso.
+faster-whisper
+
+# SpeechRecognition é a reserva, caso o Whisper não carregue
 SpeechRecognition
+
+# Áudio — captura do microfone e reprodução da fala
+# sounddevice substitui o pyaudio, que não tem wheel pré-compilado
+sounddevice
+numpy
+scipy
+
+# Text-to-speech, em ordem de preferência
+fish-audio-sdk
+edge-tts
 pyttsx3
-pyaudio
+
+# Decodifica o MP3 do Edge TTS para PCM, em Python puro.
+# Sem ele seria preciso um player externo (ffmpeg, mpg123, Windows Media
+# Player) — era isso que prendia o Jarvis ao Windows.
+miniaudio
+
+# Integração com o Kronos
+supabase
+
+# Banco de fusos horários IANA.
+# Obrigatório no Windows: o sistema não tem a base que o zoneinfo usa, e sem
+# isso o ZoneInfo("America/Sao_Paulo") do "bom dia" falha. No Linux é inofensivo.
+tzdata
