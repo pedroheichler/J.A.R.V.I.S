@@ -9,6 +9,11 @@
     "",
     "No Windows dá pra usar %USERNAME%, que é resolvido na hora de abrir.",
     "",
+    "exigir_nome: com true, só age quando chamado pelo nome (mais seguro).",
+    "Com false é só falar — mas aí qualquer conversa perto do microfone vira",
+    "comando, e o filtro de eco passa a ser a única proteção contra ele",
+    "responder à própria voz.",
+    "",
     "palavras_ativacao: a PRIMEIRA é o nome oficial, usado nas mensagens.",
     "As outras são grafias alternativas que o reconhecimento pode devolver.",
     "Escolha um nome que o reconhecimento acerte ('Jarvis' vira 'Chaves') e",
@@ -32,11 +37,16 @@
   "limiar_ativacao": 0.72,
 
 
+  "exigir_nome": true,
+
+  "sensibilidade_voz": 2.2,
+  "volume_minimo_voz": 180,
+
+
   "palavras_ativacao": [
-    "alfred",
-    "alfredo",
-    "alfrede",
-    "aufred"
+    "ryuzaki",
+    "riuzaki",
+    "riozaki"
   ],
 
   "aplicativos": {

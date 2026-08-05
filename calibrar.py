@@ -78,8 +78,74 @@ def gravar_uma_fala(reconhecedor) -> str | None:
         return None
 
 
+def medir_microfone() -> None:
+    """
+    Mede o silêncio da sala e a sua voz, e calcula o limiar certo.
+
+    É o teste pra quando ele "não ouve": se a sua voz não fica bem acima do
+    ruído de fundo, nenhum ajuste de reconhecimento vai adiantar.
+    """
+    print("\n" + "=" * 62)
+    print("PARTE 1 — O MICROFONE ESTÁ OUVINDO O SENHOR?")
+    print("=" * 62)
+
+    print("\n[a] Fique em SILÊNCIO por 3 segundos...")
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                        dtype="int16", blocksize=BLOCO) as stream:
+        silencio = [volume(stream.read(BLOCO)[0]) for _ in range(int(3 / CHUNK))]
+    ruido = float(np.median(silencio))
+    print(f"    ruído de fundo: {ruido:.0f}")
+
+    input("\n[b] Agora FALE normalmente por 3 segundos (Enter e fale)... ")
+    with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
+                        dtype="int16", blocksize=BLOCO) as stream:
+        fala = []
+        for _ in range(int(3 / CHUNK)):
+            v = volume(stream.read(BLOCO)[0])
+            fala.append(v)
+            barras = int(min(v, 3000) / 60)
+            print(f"\r    {v:6.0f} {'#' * barras:<50}", end="", flush=True)
+    print()
+
+    pico = float(np.percentile(fala, 90))   # ignora os picos isolados
+    tipico = float(np.percentile(fala, 60))
+    print(f"    sua voz: típica {tipico:.0f}, alta {pico:.0f}")
+
+    print("\n" + "-" * 62)
+    if pico < ruido * 1.5:
+        print("PROBLEMA: sua voz mal se destaca do ruído de fundo.")
+        print("Não é ajuste de software — é o microfone. Verifique:")
+        print("  - o Fifine está selecionado como entrada padrão no Windows?")
+        print("  - o volume dele está baixo nas Configurações de Som?")
+        print("  - o senhor está falando perto o suficiente?")
+        return
+
+    # Limiar no meio do caminho entre ruido e fala tipica
+    limiar_ideal = (ruido + tipico) / 2
+    fator = max(1.3, limiar_ideal / ruido) if ruido else 2.2
+
+    print(f"Boa: sua voz é {tipico/ruido:.1f}x mais forte que o silêncio.")
+    print(f"\nColoque isto no config.json:")
+    print(f'   "sensibilidade_voz": {fator:.1f},')
+    print(f'   "volume_minimo_voz": {max(80, limiar_ideal * 0.7):.0f}')
+    print(f"\n(o limiar vai ficar em ~{limiar_ideal:.0f}; "
+          f"sua fala típica é {tipico:.0f})")
+
+
 def main() -> None:
-    nome = input("Que nome você QUER usar? (ex: alfred) → ").strip().lower()
+    print("CALIBRADOR — dois testes")
+    print("  1. o microfone ouve o senhor?")
+    print("  2. o reconhecimento entende o nome escolhido?")
+
+    medir_microfone()
+
+    print("\n" + "=" * 62)
+    print("PARTE 2 — O RECONHECIMENTO ENTENDE O NOME?")
+    print("=" * 62)
+    print("(se o senhor usa \"exigir_nome\": false, pode parar por aqui — "
+          "aperte Ctrl+C)")
+
+    nome = input("\nQue nome você QUER usar? (ex: ryuzaki) → ").strip().lower()
     if not nome:
         print("Nome vazio. Saindo.")
         return

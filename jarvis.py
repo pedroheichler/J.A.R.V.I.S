@@ -260,6 +260,11 @@ LIMIAR_ATIVACAO = float(CONFIG.get("limiar_ativacao", 0.72))
 # semelhança. Ver achar_ativacao().
 TAMANHO_MINIMO_SEMELHANCA = 4
 
+# Precisa chamar pelo nome antes de cada comando? Com False, tudo que ele
+# entender vira comando — mais cômodo, porém sem rede de proteção contra
+# conversa alheia e contra a própria voz. Ver parece_eco() e main().
+EXIGIR_NOME = bool(CONFIG.get("exigir_nome", True))
+
 
 # =============================================================================
 # SYSTEM PROMPT DO CLAUDE
@@ -606,9 +611,14 @@ def ouvir_microfone() -> str | None:
     BLOCO = int(SAMPLE_RATE * CHUNK)
 
     CHUNKS_CALIBRACAO = 10    # 300 ms medindo o silêncio da sala
-    FATOR_RUIDO = 3.5         # fala precisa ser 3,5x o ruído de fundo
-    LIMIAR_MINIMO = 250       # piso, pra sala silenciosa não ficar sensível demais
     PRE_ROLL = 5              # 150 ms guardados antes da fala começar
+
+    # Quanto a fala precisa superar o ruído de fundo, e o piso absoluto.
+    # Ficam no config.json porque são o ajuste entre "não ouve o senhor" e
+    # "dispara com o ventilador". Use `python calibrar.py` para medir os
+    # números certos do seu microfone em vez de chutar.
+    FATOR_RUIDO = float(CONFIG.get("sensibilidade_voz", 2.2))
+    LIMIAR_MINIMO = float(CONFIG.get("volume_minimo_voz", 180))
 
     DEBUG = os.environ.get("JARVIS_DEBUG_FALA") == "1"
 
@@ -1171,10 +1181,15 @@ def parece_eco(ouvido: str) -> bool:
         return False
 
     palavras_ouvidas = separar_palavras(ouvido)
+    if not palavras_ouvidas:
+        return False
 
-    # Uma palavra só é pouco pra decidir, e bloquearia um "Jarvis" legítimo
-    # dito logo depois de uma resposta que continha o nome dele.
-    if len(palavras_ouvidas) < 2:
+    # Com a palavra de ativação ligada, uma palavra só é pouco pra decidir:
+    # bloquear aí impediria um "L" legítimo dito logo depois de uma resposta
+    # que continha o nome. Sem a palavra de ativação essa proteção não faz
+    # sentido, e qualquer fragmento do próprio texto pode reiniciar o ciclo —
+    # então ali vale filtrar até fragmentos de uma palavra.
+    if EXIGIR_NOME and len(palavras_ouvidas) < 2:
         return False
 
     palavras_ditas = separar_palavras(ultima_fala)
@@ -1421,10 +1436,14 @@ def main():
     thread_palma = threading.Thread(target=detectar_palma, daemon=True)
     thread_palma.start()
 
-    # Com wake word, o Jarvis fica escutando mas só age quando é chamado
-    # pelo nome. Para voltar ao comportamento antigo — reagir a tudo que
-    # ouve, com o teclado como alternativa — rode com JARVIS_SEM_WAKE_WORD=1.
-    usar_wake_word = os.environ.get("JARVIS_SEM_WAKE_WORD") != "1"
+    # Exigir o nome antes de cada comando é mais seguro, mas cansativo.
+    # Com "exigir_nome": false no config.json, tudo que ele entender vira
+    # comando — o filtro de eco passa a ser a única proteção contra ele
+    # responder a si mesmo. A variável de ambiente ainda funciona como
+    # atalho para um teste pontual, sem mexer no arquivo.
+    usar_wake_word = bool(CONFIG.get("exigir_nome", True))
+    if os.environ.get("JARVIS_SEM_WAKE_WORD") == "1":
+        usar_wake_word = False
 
     # Vira False no primeiro erro de microfone. O teclado continua valendo.
     microfone_ok = True
@@ -1442,9 +1461,11 @@ def main():
               f"(aqui o \"{NOME_ATIVACAO}\" não é necessário)")
         print("  Encerrar : diga \"tchau\" ou aperte Ctrl+C\n")
     else:
-        falar("Olá, senhor. Como posso ajudá-lo?")
-        print("\n  Modo sem palavra de ativação: qualquer fala vira comando.")
-        print("  Encerrar: diga \"tchau\" ou aperte Ctrl+C\n")
+        falar("Olá, senhor. Estou ouvindo.")
+        print("\n  Escuta livre: é só falar, sem precisar chamar pelo nome.")
+        print("  Atenção: qualquer conversa perto do microfone vira comando.")
+        print("  Para voltar a exigir o nome: \"exigir_nome\": true no config.json")
+        print("  Encerrar : diga \"tchau\" ou aperte Ctrl+C\n")
 
     while True:
         # ----- Captura de entrada -----
