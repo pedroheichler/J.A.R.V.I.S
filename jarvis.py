@@ -256,6 +256,10 @@ PALAVRAS_ATIVACAO = tuple(sorted(_ativacao, key=len, reverse=True))
 #   mais baixo = reconhece mais, mas dispara em palavras parecidas
 LIMIAR_ATIVACAO = float(CONFIG.get("limiar_ativacao", 0.72))
 
+# Abaixo desse tamanho, o nome passa a exigir igualdade exata em vez de
+# semelhança. Ver achar_ativacao().
+TAMANHO_MINIMO_SEMELHANCA = 4
+
 
 # =============================================================================
 # SYSTEM PROMPT DO CLAUDE
@@ -1059,9 +1063,18 @@ def achar_ativacao(palavras: list[str]) -> tuple[int, int, float] | None:
     for alvo in PALAVRAS_ATIVACAO:
         tamanho = len(alvo.split())
 
+        # Nome muito curto ("l", "ok") exige igualdade exata. Semelhança de
+        # uma ou duas letras não significa nada: "l" casaria com "a", "e",
+        # "é", "lá" e metade do dicionário.
+        exigir_exato = len(alvo) < TAMANHO_MINIMO_SEMELHANCA
+
         for i in range(len(palavras) - tamanho + 1):
             trecho = " ".join(palavras[i:i + tamanho])
-            nota = SequenceMatcher(None, trecho, alvo).ratio()
+
+            if exigir_exato:
+                nota = 1.0 if trecho == alvo else 0.0
+            else:
+                nota = SequenceMatcher(None, trecho, alvo).ratio()
 
             if nota >= LIMIAR_ATIVACAO and (melhor is None or nota > melhor[2]):
                 melhor = (i, i + tamanho, nota)
