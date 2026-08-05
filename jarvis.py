@@ -1256,10 +1256,15 @@ def main():
 
     if usar_wake_word:
         falar("Olá, senhor. Diga o meu nome quando precisar de mim.")
+        nome = PALAVRAS_ATIVACAO[0]
+        print(f"\n  Por voz  : comece pelo nome — \"{nome}, que horas são?\"")
+        print(f"  Digitando: escreva o comando e aperte Enter "
+              f"(aqui o \"{nome}\" não é necessário)")
+        print("  Encerrar : diga \"tchau\" ou aperte Ctrl+C\n")
     else:
         falar("Olá, senhor. Como posso ajudá-lo?")
-
-    print("(ou digite o comando aqui e aperte Enter — Ctrl+C encerra)")
+        print("\n  Modo sem palavra de ativação: qualquer fala vira comando.")
+        print("  Encerrar: diga \"tchau\" ou aperte Ctrl+C\n")
 
     while True:
         # ----- Captura de entrada -----
@@ -1302,7 +1307,11 @@ def main():
                     comando = extrair_comando_apos_ativacao(ouvido)
 
                     if comando is None:
-                        continue  # falaram, mas não com o Jarvis
+                        # Falaram, mas não com o Jarvis. Sem esse aviso o
+                        # silêncio parece defeito em vez de comportamento.
+                        print(f"[Jarvis] (me chame de "
+                              f"'{PALAVRAS_ATIVACAO[0]}' primeiro)")
+                        continue
 
                     if not comando:
                         # Chamou o nome sem mandar comando. Pergunta e escuta.
@@ -1339,5 +1348,14 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\n[Jarvis] Encerrando...")
-        falar("Até mais!")
+
+        # Despedida pela voz OFFLINE, não pela Fish Audio. No Ctrl+C a
+        # conexão já está sendo derrubada, e uma chamada de rede aqui trava
+        # ou explode num traceback gigante em cima do usuário.
+        try:
+            engine.say("Até mais, senhor.")
+            engine.runAndWait()
+        except Exception:
+            pass  # despedida é enfeite; não vale falhar por causa dela
+
         sys.exit(0)
