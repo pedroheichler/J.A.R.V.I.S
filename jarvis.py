@@ -292,9 +292,25 @@ uma pergunta ou conversa — conversar não precisa de ferramenta.
 Quando um pedido exigir mais de uma ação, chame várias ferramentas na mesma
 resposta. "Abre o Kronos e me diz minhas tarefas" são duas ferramentas.
 
-Depois de usar as ferramentas, responda em uma ou duas frases curtas dizendo o
-que foi feito. Sua resposta é falada em voz alta, então escreva como se fosse
-falar: sem listas, sem markdown, sem emojis, sem URLs soletradas.
+COMO CONVERSAR:
+Sua resposta é falada em voz alta. Escreva como se fosse falar: sem listas,
+sem markdown, sem emojis, sem títulos e sem soletrar URLs.
+
+Não seja lacônico. O senhor quer um assistente que conversa, não um que só
+obedece e cala. Depois de executar algo, comente — acrescente a observação
+que fizer sentido ali: um dado útil, uma opinião, um alerta, uma sugestão do
+próximo passo, ou uma ironia bem colocada.
+
+Quando ele perguntar algo, responda com substância. Dê o contexto que ajuda
+a entender, não só o dado seco. Se souber de algo relacionado que ele não
+perguntou mas que muda a resposta, diga.
+
+Puxe assunto quando for natural. Se notar algo digno de nota no que ele
+pediu — um horário estranho, uma tarefa atrasada, um padrão — mencione.
+
+Duas a quatro frases costumam ser o tamanho certo. Alongue quando o assunto
+merecer e encurte quando for só uma confirmação rápida — ninguém precisa de
+três frases para "abri o Chrome".
 
 APLICATIVOS DISPONÍVEIS:
 {", ".join(NOMES_APPS)}
@@ -853,22 +869,41 @@ def processar_comando(texto_usuario: str) -> None:
     """
     global historico
 
+    # O contexto do momento vai junto da PERGUNTA, não do system prompt.
+    # Motivo: o cache de prompt casa por prefixo. Como o system prompt vem
+    # antes de tudo, colocar a hora lá dentro mudaria o prefixo a cada
+    # minuto e jogaria o cache fora — que é justamente onde está o dinheiro,
+    # já que o prompt e as sete ferramentas são reenviados a cada chamada.
+    pergunta = f"{montar_contexto()}\n\n{texto_usuario}"
+
     # Histórico anterior + a pergunta nova. Só gravamos no `historico` depois
     # que der certo — senão uma falha de rede deixaria uma pergunta órfã.
-    mensagens = historico + [{"role": "user", "content": texto_usuario}]
+    mensagens = historico + [{"role": "user", "content": pergunta}]
 
     try:
         runner = client.beta.messages.tool_runner(
             model=MODELO,
             # O teto cobre o raciocínio E a resposta juntos. Como o modelo
             # pensa antes de responder, um teto apertado corta a fala no meio.
-            max_tokens=2000,
-            # effort regula quanto ele raciocina. "low" é o ponto certo aqui:
-            # as tarefas são curtas e o senhor está esperando de ouvido, então
-            # velocidade vale mais que profundidade. Suba pra "medium" ou
-            # "high" no config.json se quiser respostas mais elaboradas.
+            max_tokens=3000,
+            # effort regula quanto ele raciocina antes de falar. "medium"
+            # equilibra: pensa o suficiente pra responder bem, sem a espera
+            # que o senhor sentiria de ouvido. Ajustável no config.json.
             output_config={"effort": ESFORCO},
-            system=SYSTEM_PROMPT + montar_contexto(),
+            # Fixo, palavra por palavra, em todas as chamadas — é o que
+            # permite o cache funcionar. O que muda vai na pergunta.
+            #
+            # A marca de cache fica AQUI, no system, e não no topo da
+            # chamada. As ferramentas são enviadas antes do system, então
+            # esta marca guarda as duas coisas — e só elas. No topo, ela
+            # cairia no último bloco, que é a pergunta: como a pergunta muda
+            # a cada comando, o cache seria reescrito toda vez (a 125% do
+            # preço) em vez de reaproveitado (a 10%).
+            system=[{
+                "type": "text",
+                "text": SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
             tools=FERRAMENTAS,
             messages=mensagens,
             max_iterations=8,
